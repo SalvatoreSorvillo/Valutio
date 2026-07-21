@@ -1,0 +1,5 @@
+# Market quotes are fetched server-side so the browser is not blocked by Yahoo's CORS policy.
+/yq/*      /.netlify/functions/yahoo?path=:splat  200
+
+/terms     /terms.html     200
+/privacy   /privacy.html   200

@@ -1,0 +1,33 @@
+# Local editor and assistant settings
+.claude/
+.codex/
+.agents/
+.vscode/
+.idea/
+
+# OS cruft
+Thumbs.db
+.DS_Store
+
+# Python/build artifacts
+__pycache__/
+*.py[cod]
+
+# JavaScript dependencies, if used for local experiments
+node_modules/
+
+# Logs and local environment
+*.log
+.env
+.env.*
+
+# Personal financial backups must never enter version control
+*wallet-backup*.json
+*valutio-backup*.json
+*.backup.json
+
+# Optional local public export if the publish script is pointed inside this folder
+Valutio-public/
+
+# Local publishing notes
+update-github-version.txt
