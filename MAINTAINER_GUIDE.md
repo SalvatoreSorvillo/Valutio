@@ -69,7 +69,8 @@ The readable source folder is the only place to edit the application.
 | `Scripts/generate-stress-wallet.mjs` | Large synthetic-wallet generator |
 | `Scripts/build-deploy.py` | Minifies and copies the deployable application |
 | `Scripts/publish-public.py` | Rebuilds the clean public source export and syncs website demo assets |
-| `publish-public.sh` | Normal public-publishing wrapper |
+| `publish-public.ps1` | Normal Windows public-publishing wrapper |
+| `Scripts/start-valutio-wallet.ps1` | Windows local server launcher with no-cache responses |
 | `PUBLISHING.md` | Release commands and folder workflow |
 | `Rules/` | Contribution, security, trademark, and CLA policies |
 | `Docs/Screenshots/demo/` | Stable README presentation screenshots |
@@ -679,14 +680,15 @@ Optimize with explicit invalidation and result comparison. Never cache across le
 
 Required checks:
 
-```bash
-node --check app.js
-node --check app.i18n.js
-node --check statement-categorizer.js
-node Scripts/test-financial-logic.mjs
-node Scripts/test-statement-categorizer.mjs
-node Scripts/generate-stress-wallet.mjs /tmp/valutio-stress-wallet.json
-node Scripts/validate-wallet-backup.mjs /tmp/valutio-stress-wallet.json
+```powershell
+node --check .\app.js
+node --check .\app.i18n.js
+node --check .\statement-categorizer.js
+node .\Scripts\test-financial-logic.mjs
+node .\Scripts\test-statement-categorizer.mjs
+$stressWallet = Join-Path $env:TEMP "valutio-stress-wallet.json"
+node .\Scripts\generate-stress-wallet.mjs $stressWallet
+node .\Scripts\validate-wallet-backup.mjs $stressWallet
 ```
 
 Current financial coverage includes calendar validation, invoice-date preflight, dollar-format context, fiscal boundaries, same-day ordering, close/reopen basis, CGT anniversary, capital-loss isolation/order/five-year carry, out-of-year invoices, archive and invoice-FX migration, unused currency and 18-decimal preservation, retirement and statement-rule migration, statement apply idempotency, sold-out refresh exclusion, bracket validation, oversell detection, backup currency completeness, and a 100,000-transaction guard. The statement suite separately covers date/money parsing, debit/credit CSV direction, Personal/Joint ownership, exclusions, reversals, overlaps, encodings, keyword categories and per-transaction apply rows.
@@ -761,23 +763,24 @@ The version when this guide was written is 477. Increment it for the next app re
 
 Normal release:
 
-```bash
-node --check app.js
-node --check app.i18n.js
-node --check statement-categorizer.js
-node Scripts/test-financial-logic.mjs
-node Scripts/test-statement-categorizer.mjs
-node Scripts/generate-stress-wallet.mjs /tmp/valutio-stress-wallet.json
-node Scripts/validate-wallet-backup.mjs /tmp/valutio-stress-wallet.json
-bash publish-public.sh
+```powershell
+node --check .\app.js
+node --check .\app.i18n.js
+node --check .\statement-categorizer.js
+node .\Scripts\test-financial-logic.mjs
+node .\Scripts\test-statement-categorizer.mjs
+$stressWallet = Join-Path $env:TEMP "valutio-stress-wallet.json"
+node .\Scripts\generate-stress-wallet.mjs $stressWallet
+node .\Scripts\validate-wallet-backup.mjs $stressWallet
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-public.ps1
 ```
 
-`publish-public.sh` builds deploy unless `--skip-build`, mirrors the private website demo assets into `../valutio-deploy/assets/demo`, empties the generated GitHub folder except `.git`, copies clean source, excludes private backups/env/logs/caches/local notes, and does not commit or push.
+`publish-public.ps1` builds deploy unless `--skip-build`, mirrors the private website demo assets into `..\valutio-deploy\assets\demo`, empties the generated GitHub folder except `.git`, copies clean source, excludes private backups/env/logs/caches/local notes, and does not commit or push.
 
 Then:
 
-```bash
-cd ../Valutio-public/github
+```powershell
+Set-Location ..\Valutio-public\github
 git status
 git diff
 git add .
@@ -789,14 +792,14 @@ Deploy `../valutio-deploy` to Netlify after review. The root needs proxy routing
 
 Documentation-only sync:
 
-```bash
-bash publish-public.sh --skip-build
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-public.ps1 --skip-build
 ```
 
 Build dependencies:
 
-```bash
-python3 -m pip install rjsmin rcssmin
+```powershell
+py -m pip install rjsmin rcssmin
 ```
 
 Never build from or hand-edit a generated folder.

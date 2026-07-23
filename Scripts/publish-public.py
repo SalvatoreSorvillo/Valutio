@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Prepare a clean public source export of Valutio.
 
 This script keeps the private working folder separate from the public release.
@@ -180,7 +179,7 @@ def main() -> int:
     print("Public GitHub-ready source:", github_dir)
     print()
     print("Next steps:")
-    print("  cd", github_dir)
+    print("  Set-Location", github_dir)
     print("  git status")
     print("  git add .")
     print('  git commit -m "Describe the update"')

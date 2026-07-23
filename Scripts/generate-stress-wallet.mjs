@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import fs from "node:fs";
 
 const out = process.argv[2] || "Docs/stress-wallet.json";

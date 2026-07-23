@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build the deployable /app payload from the readable source.
 
 The readable source folder stays the single source of truth. This script
@@ -11,10 +10,10 @@ copies the public app bundle to ../valutio-deploy/app:
 Release workflow:
   1. Edit code here in Valutio-source.
   2. BUMP the CACHE version string in sw.js (this is what triggers the in-app update prompt).
-  3. python Scripts/build-deploy.py
+  3. py Scripts\\build-deploy.py
   4. Redeploy the valutio-deploy folder to Netlify.
 
-Requires: pip install rjsmin rcssmin
+Requires: py -m pip install rjsmin rcssmin
 """
 import os, re, shutil, sys
 try:

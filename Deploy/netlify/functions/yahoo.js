@@ -4,7 +4,18 @@ var HOSTS = ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.c
 
 exports.handler = async function (event) {
   var params = Object.assign({}, event.queryStringParameters || {});
-  var path = String(params.path || "").replace(/^\/+/, "");
+  var path = String(params.path || "");
+  if (!path) {
+    var requestPath = String(event.path || "");
+    var prefixes = ["/.netlify/functions/yahoo/", "/yq/"];
+    for (var i = 0; i < prefixes.length; i += 1) {
+      if (requestPath.indexOf(prefixes[i]) === 0) {
+        path = requestPath.slice(prefixes[i].length);
+        break;
+      }
+    }
+  }
+  path = path.replace(/^\/+/, "");
   delete params.path;
   if (!/^v[18]\/finance\/(?:chart|search)\//.test(path) && !/^v1\/finance\/search$/.test(path)) {
     return { statusCode: 400, body: "Unsupported market-data path" };

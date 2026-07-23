@@ -12,7 +12,7 @@ Curated demo screenshots are captured with the included demo data. Light mode is
 
 [Open the screenshot gallery](Docs/Screenshots/demo/README.md)
 
-| Dashboard | Dark dashboard | 
+| Dashboard | Dark dashboard |
 | --- | --- |
 | ![Valutio dashboard in light mode](Docs/Screenshots/demo/dashboard_light.png) | ![Valutio dashboard in dark mode](Docs/Screenshots/demo/dashboard_dark.png) |
 
@@ -54,19 +54,19 @@ Valutio is local-first:
 
 ## Run locally
 
-From this folder, start a static server:
+From PowerShell in this folder, start the local server:
 
-```bash
-python3 -m http.server 8123
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\start-valutio-wallet.ps1
 ```
 
-Then open:
+The script opens the browser automatically at:
 
 ```text
-http://localhost:8123/
+http://127.0.0.1:8123/
 ```
 
-The app can also be opened directly from `index.html`, but a local server is the best way to test install/offline behaviour because browsers restrict some PWA features on file URLs.
+The launcher requires Node.js. The app can also be opened directly from `index.html`, but a local server is the best way to test install/offline behaviour because browsers restrict some PWA features on file URLs.
 
 ## Data import and export
 
@@ -89,21 +89,22 @@ Personal backups should not be committed to the repository. The `.gitignore` fil
 
 Run the dependency-free financial regression suite:
 
-```bash
-node Scripts/test-financial-logic.mjs
-node Scripts/test-statement-categorizer.mjs
+```powershell
+node .\Scripts\test-financial-logic.mjs
+node .\Scripts\test-statement-categorizer.mjs
 ```
 
 Validate a JSON backup before sharing, debugging or importing it:
 
-```bash
-node Scripts/validate-wallet-backup.mjs path/to/wallet-backup.json
+```powershell
+node .\Scripts\validate-wallet-backup.mjs .\path\to\wallet-backup.json
 ```
 
 Generate a heavier synthetic wallet for manual stress testing:
 
-```bash
-node Scripts/generate-stress-wallet.mjs /tmp/valutio-stress-wallet.json
+```powershell
+$stressWallet = Join-Path $env:TEMP "valutio-stress-wallet.json"
+node .\Scripts\generate-stress-wallet.mjs $stressWallet
 ```
 
 Then validate or import the generated JSON in the app and check dashboard, investments, cash flow, history, tax and retirement performance.
@@ -130,20 +131,20 @@ The public workflow also mirrors `../Website-source/assets/demo` into `../valuti
 
 Install the small minifier dependencies once:
 
-```bash
-python3 -m pip install rjsmin rcssmin
+```powershell
+py -m pip install rjsmin rcssmin
 ```
 
 Build only the deployable app payload:
 
-```bash
-python3 Scripts/build-deploy.py
+```powershell
+py .\Scripts\build-deploy.py
 ```
 
 For a public GitHub-ready export, run:
 
-```bash
-bash publish-public.sh
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-public.ps1
 ```
 
 Before a public release, bump the service-worker cache version in `sw.js` and the query strings in `index.html` so installed users receive the update prompt. See `PUBLISHING.md` for the full release workflow.
@@ -166,6 +167,8 @@ Before a public release, bump the service-worker cache version in `sw.js` and th
 - `Rules/`: contribution, security and trademark policies.
 - `Scripts/build-deploy.py`: deploy app builder.
 - `Scripts/publish-public.py`: clean GitHub export builder and website demo asset sync.
+- `Scripts/start-valutio-wallet.ps1`: Windows local server launcher with a no-cache response policy.
+- `publish-public.ps1`: Windows public-publishing wrapper.
 - `Scripts/test-financial-logic.mjs`: deterministic tax, investment, migration and scale regression tests.
 - `Scripts/test-statement-categorizer.mjs`: deterministic statement parsing, classification, reversal, overlap, encoding, scale and application tests.
 - `Scripts/validate-wallet-backup.mjs`: JSON backup integrity checker.

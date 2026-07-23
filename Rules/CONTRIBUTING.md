@@ -18,18 +18,18 @@ for the application and must be updated when those contracts change.
 
 ## Development
 
-Run the app from the repository root with a static server:
+Run the app from the repository root in PowerShell:
 
-```bash
-python3 -m http.server 8123
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\start-valutio-wallet.ps1
 ```
 
 Then open `http://localhost:8123/`.
 
 For a release build, install the minifier dependencies and run:
 
-```bash
-python3 Scripts/build-deploy.py
+```powershell
+py .\Scripts\build-deploy.py
 ```
 
 ## Pull requests

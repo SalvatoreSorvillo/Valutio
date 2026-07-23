@@ -6,23 +6,23 @@ The goal is to publish a clean repository that starts from the polished public v
 
 ## First public release
 
-From `Valutio-source`, run:
+From `Valutio-source` in PowerShell, run:
 
-```bash
-bash publish-public.sh
-```
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-public.ps1
 
 This updates `../Valutio-public/github`, the clean source folder to connect to GitHub.
 
 Then publish from the clean folder:
 
-```bash
-cd ../Valutio-public/github
+```powershell
+Set-Location ..\Valutio-public\GitHub
+
 git status
 git add .
 git commit -m "Initial public release"
 git remote add origin https://github.com/SalvatoreSorvillo/Valutio.git
 git push -u origin main
+
 ```
 
 
@@ -33,20 +33,25 @@ git push -u origin main
 3. Bump the query strings in `index.html` for `app.css` and `app.js`.
 4. Run the basic checks:
 
-```bash
-node --check app.js
-node --check app.i18n.js
-node --check statement-categorizer.js
-node Scripts/test-financial-logic.mjs
-node Scripts/test-statement-categorizer.mjs
-node Scripts/generate-stress-wallet.mjs /tmp/valutio-stress-wallet.json
-node Scripts/validate-wallet-backup.mjs /tmp/valutio-stress-wallet.json
+```powershell
+
+node --check .\app.js
+node --check .\app.i18n.js
+node --check .\statement-categorizer.js
+node .\Scripts\test-financial-logic.mjs
+node .\Scripts\test-statement-categorizer.mjs
+$stressWallet = Join-Path $env:TEMP "valutio-stress-wallet.json"
+node .\Scripts\generate-stress-wallet.mjs $stressWallet
+node .\Scripts\validate-wallet-backup.mjs $stressWallet
+
 ```
 
 5. Run:
 
-```bash
-bash publish-public.sh
+```powershell
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-public.ps1
+
 ```
 
 6. Go to `../Valutio-public/github`, review the generated changes, commit and push.
@@ -58,8 +63,10 @@ The script overwrites the generated GitHub export from `Valutio-source`, runs `S
 
 Skip the deploy build if you only changed documentation:
 
-```bash
-bash publish-public.sh --skip-build
+```powershell
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\publish-public.ps1 --skip-build
+
 ```
 
-The Bash wrapper passes `--force` by default because `../Valutio-public/github` is generated from `Valutio-source`. Call `python3 Scripts/publish-public.py` directly only if you want the lower-level safety checks.
+The PowerShell wrapper passes `--force` by default because `..\Valutio-public\github` is generated from `Valutio-source`. Call `py .\Scripts\publish-public.py` directly only if you want the lower-level safety checks.
