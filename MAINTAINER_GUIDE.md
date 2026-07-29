@@ -63,6 +63,8 @@ The readable source folder is the only place to edit the application.
 | `Vendor/pdfjs/` | Pinned PDF.js runtime and Apache-2.0 license for offline statement text extraction |
 | `Rules/statement-categorizer-defaults.json` | Default expense keywords, exclusions, and reversal terms |
 | `Deploy/` | Files copied to the deploy root, including Netlify routing |
+| `Docker/nginx.conf` | Container server config: static source, no-store responses, and the local `/yq` proxy |
+| `docker-compose.yml` | Containerised local server, platform-independent alternative to the PowerShell launcher |
 | `Scripts/test-financial-logic.mjs` | Deterministic financial regression suite |
 | `Scripts/test-statement-categorizer.mjs` | Deterministic statement parsing and categorisation suite |
 | `Scripts/validate-wallet-backup.mjs` | JSON-backup validator |
@@ -114,6 +116,21 @@ The app renders HTML strings and delegates actions through `data-act`. Follow th
 12. Schedule backups, reminders, rates, and service-worker behavior.
 
 Do not render before asynchronous storage loading finishes. That can briefly show or save an empty wallet over real data.
+
+### Local servers
+
+Two interchangeable local servers exist. Both serve the source folder unbuilt on `http://127.0.0.1:8123/` and both must answer with `Cache-Control: no-store`, otherwise the service worker keeps serving a stale build while you are testing a change.
+
+| Launcher | Requires | Serves `/yq` |
+| --- | --- | --- |
+| `Scripts/start-valutio-wallet.ps1` (wraps `Scripts/serve-wallet.mjs`) | Windows, Node.js | No |
+| `docker compose up -d` (`docker-compose.yml` + `Docker/nginx.conf`) | Docker | Yes |
+
+The container mounts the source folder read-only, so it never writes into the repository and needs no rebuild after an edit. Its port is published on `127.0.0.1` only. `VALUTIO_PORT` overrides the host port. Repository dotfolders are refused, because the mount exposes the whole working tree.
+
+The container's `/yq/*` location mirrors `Deploy/netlify/functions/yahoo.js`, including the same allowed-path whitelist; unsupported paths return 400 before the request leaves the container. Keep the two in sync when the whitelist changes, so local testing keeps matching production. The container is the only local way to exercise the same-origin market-data path.
+
+Neither local server is part of a build or release. They are development tools and are excluded from deploy output.
 
 ## 5. Persistence, Recovery, and Migrations
 
@@ -560,6 +577,8 @@ When changing country constants, update source comments, effective year, visible
 FX refresh updates the live currency pool. Closed months keep frozen rates.
 
 Yahoo Finance is the keyless stock/ETF/bond/commodity default. Production uses the same-origin `/yq` Netlify proxy. Optional keyed providers remain local settings.
+
+`YQ_PROXIES` puts `/yq` first everywhere except localhost and `file:`, where the public browser proxy is tried first because the source-folder launchers have no `/yq`. The Docker launcher does serve `/yq`, so it stays reachable as the second route there; use it to verify proxy changes locally.
 
 Yahoo can report native currency or minor units such as GBp/GBX, ZAc/ZAX, and ILA. Reconcile provider units and `apiCurrency` before saving a holding price. Reject unsafe conversions.
 

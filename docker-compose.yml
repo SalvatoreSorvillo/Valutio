@@ -1,0 +1,23 @@
+# Local Valutio server in a container.
+#
+#   docker compose up -d      ->  http://127.0.0.1:8123/
+#   docker compose down
+#
+# The source folder is mounted read-only, so edits to app.js/app.css/index.html are
+# live on the next browser reload; no image rebuild is needed.
+services:
+  valutio:
+    image: nginx:1.27-alpine
+    container_name: valutio
+    ports:
+      - "127.0.0.1:${VALUTIO_PORT:-8123}:8080"
+    volumes:
+      - ./:/usr/share/nginx/html:ro
+      - ./Docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

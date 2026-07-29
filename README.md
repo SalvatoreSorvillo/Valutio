@@ -68,6 +68,26 @@ http://127.0.0.1:8123/
 
 The launcher requires Node.js. The app can also be opened directly from `index.html`, but a local server is the best way to test install/offline behaviour because browsers restrict some PWA features on file URLs.
 
+### Run with Docker Compose
+
+If you prefer containers, or you are not on Windows, start the app with Docker instead. It requires no Node.js and no PowerShell:
+
+```bash
+docker compose up -d
+```
+
+The app is then available at the same address:
+
+```text
+http://127.0.0.1:8123/
+```
+
+Stop it with `docker compose down`. Use a different port with `VALUTIO_PORT=9000 docker compose up -d`.
+
+The container runs nginx and mounts this folder read-only, so edits to `app.js`, `app.css` or `index.html` appear on the next browser reload without rebuilding anything. Responses are sent with `Cache-Control: no-store`, matching the PowerShell launcher, so the service worker never serves a stale build during development.
+
+Unlike the other local launchers, the container also serves the same-origin `/yq/*` market-data proxy that the deployed site uses, so live Yahoo Finance stock prices work locally exactly as they do in production. The port is bound to `127.0.0.1`, so the server is not reachable from other machines on your network.
+
 ## Data import and export
 
 Valutio supports:
@@ -164,6 +184,8 @@ Before a public release, bump the service-worker cache version in `sw.js` and th
 - `Templates/`: Excel starter and cash-flow templates.
 - `Vendor/`: SheetJS and PDF.js browser bundles with their licenses for offline Excel and statement PDF support.
 - `Deploy/`: hosting redirects and the server-side Yahoo Finance proxy used by deployed builds.
+- `docker-compose.yml`: containerised local server on `http://127.0.0.1:8123/`.
+- `Docker/nginx.conf`: container server config, including the local `/yq/*` market-data proxy.
 - `Rules/`: contribution, security and trademark policies.
 - `Scripts/build-deploy.py`: deploy app builder.
 - `Scripts/publish-public.py`: clean GitHub export builder and website demo asset sync.
