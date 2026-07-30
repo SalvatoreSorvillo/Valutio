@@ -652,6 +652,8 @@ Tables must keep matching header/footer surfaces, normal body surfaces, consiste
 
 Selects hide native duplicate arrows and show one app arrow. Menus remain themed/readable in all modes.
 
+At 1024 CSS pixels and below, the application uses the responsive shell: a compact sticky summary header, horizontally scrollable utility and bottom route rails, single-column content where needed, and safe-area padding. Wide financial tables retain all columns inside their own horizontal scroll wrappers and must never widen or clip the document. Touch targets are at least 44px, and actions that are hover-revealed on desktop remain visible on coarse or non-hover pointers.
+
 ## 19. Privacy and Security
 
 Wallet data is origin-sandboxed browser data but is readable by JavaScript on that origin.

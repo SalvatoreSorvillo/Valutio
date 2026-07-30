@@ -2557,7 +2557,7 @@
     modalRoot.innerHTML =
       '<div class="tut-blocker dim"></div>' +
       '<div class="tut-card">' +
-      '<div class="tut-progress"><div class="tut-progress-fill" style="width:' + Math.round((i + 1) / TUTORIAL_STEPS.length * 100) + '%"></div></div>' +
+      '<div class="tut-progress"><div class="tut-progress-fill" style="transform:scaleX(' + ((i + 1) / TUTORIAL_STEPS.length).toFixed(4) + ')"></div></div>' +
       '<div class="tut-ico">' + icon(s.ico) + "</div>" +
       '<div class="tut-step">Step ' + (i + 1) + " of " + TUTORIAL_STEPS.length + "</div>" +
       "<h3>" + s.title + "</h3>" +
@@ -2872,13 +2872,13 @@
       chgHTML = '<div class="chg ' + signClass(d) + '">' + icon(d >= 0 ? "arrowUp" : "arrowDown") +
         signFmt(d, base()) + " (" + (d >= 0 ? "+" : "") + pct(dp) + ")</div>";
     }
-    return '<div class="sidebar"><div class="brand">' +
+    return '<div class="sidebar"><div class="sidebar-summary"><div class="brand">' +
       '<span class="mark"><img src="Icons/VAL-03.png" alt="Valutio"></span>' +
       '<button class="name" data-act="rename-wallet" title="Click to rename">' + esc(db.settings.name || "Valutio") +
       '<span class="sub">Net worth tracker</span></button>' +
       "</div>" +
       '<div class="side-networth"><span class="nw-label">Net worth</span><strong class="nw-value">' +
-      fmtBase(nwNow, 0) + "</strong>" + chgHTML + "</div>" +
+      fmtBase(nwNow, 0) + "</strong>" + chgHTML + "</div></div>" +
       period +
       '<div class="nav-sep"></div>' +
       '<nav class="nav">' +
@@ -2918,7 +2918,8 @@
   }
   function pageHead(title, sub, actions, badge) {
     var eye = EYE_ROUTES[state.route] ? eyeToggleBtn() : "";
-    return '<div class="page-head"><div><h1>' + esc(title) + (badge ? " " + badge : "") + "</h1>" +
+    var eyeOnly = !!eye && !actions;
+    return '<div class="page-head' + (eyeOnly ? " eye-only" : "") + '"><div><h1>' + esc(title) + (badge ? " " + badge : "") + "</h1>" +
       (sub ? '<div class="sub">' + sub + "</div>" : "") + "</div>" +
       '<div class="head-actions">' + eye + (actions || "") + "</div></div>";
   }
@@ -5638,15 +5639,15 @@
       '<div class="panel mb"><h2>Backups</h2>' +
       '<p class="hint mb">Your wallet lives only in this browser. Keep a copy somewhere safe so a cleared cache never costs you your history.</p>' +
       backupHealth +
-      '<div class="hint" style="margin:0 0 14px">Last backup: <strong>' + esc(bkLast) + "</strong></div>" +
-      '<div class="row" style="align-items:flex-end;max-width:540px">' +
-        '<div class="field" style="max-width:190px"><label>Automatic backup</label><select data-act="set-autobackup">' + freqOpts + "</select></div>" +
-        (bkFs ? '<div class="field" style="flex:0 0 auto"><label>&nbsp;</label><button class="btn" data-act="choose-backup-folder">' + icon("assets") + " Choose folder</button></div>" : "") +
-        '<div class="field" style="flex:0 0 auto"><label>&nbsp;</label><button class="btn primary" data-act="backup-now">' + icon("arrowDown") + " Back up now</button></div>" +
+      '<div class="hint backup-last" style="margin:0 0 14px">Last backup: <strong>' + esc(bkLast) + "</strong></div>" +
+      '<div class="row backup-controls" style="align-items:flex-end;max-width:540px">' +
+        '<div class="field backup-schedule-field" style="max-width:190px"><label>Automatic backup</label><select data-act="set-autobackup">' + freqOpts + "</select></div>" +
+        (bkFs ? '<div class="field backup-action-field" style="flex:0 0 auto"><label class="backup-action-label" aria-hidden="true">&nbsp;</label><button class="btn" data-act="choose-backup-folder">' + icon("assets") + " Choose folder</button></div>" : "") +
+        '<div class="field backup-action-field" style="flex:0 0 auto"><label class="backup-action-label" aria-hidden="true">&nbsp;</label><button class="btn primary" data-act="backup-now">' + icon("arrowDown") + " Back up now</button></div>" +
       "</div>" +
       (bkFs
-        ? '<p class="hint" style="margin:12px 0 0">Pick a folder once and Valutio writes a fresh JSON backup there automatically on your schedule - no clicks needed. Everything stays on this device; nothing is uploaded.</p>'
-        : '<p class="hint" style="margin:12px 0 0">Automatic folder backups need Chrome or Edge. Here, use <strong>Back up now</strong> (or turn on reminders below) to keep a copy.</p>') +
+        ? '<p class="hint backup-note" style="margin:12px 0 0">Pick a folder once and Valutio writes a fresh JSON backup there automatically on your schedule - no clicks needed. Everything stays on this device; nothing is uploaded.</p>'
+        : '<p class="hint backup-note" style="margin:12px 0 0">Automatic folder backups need Chrome or Edge. Here, use <strong>Back up now</strong> (or turn on reminders below) to keep a copy.</p>') +
       "</div>" +
       '<div class="panel"><h2>Reminders</h2>' +
       '<p class="hint mb">A gentle nudge at the start of each month to review last month and keep a backup. Stays on this device - nothing leaves your browser.</p>' +
@@ -5667,7 +5668,7 @@
       '<div class="help-box" style="margin:0 0 14px"><strong>Estimates &amp; accuracy.</strong> Prices, exchange rates, valuations and tax figures may be delayed, incomplete or inaccurate, and tax results are rough estimates based on the settings you enter - not an official assessment. Verify anything important against your own records and official sources.</div>' +
       '<div class="help-box" style="margin:0 0 14px"><strong>Provided &quot;as is&quot;.</strong> Valutio is provided without warranties of any kind, express or implied, and you use it at your own risk. To the maximum extent permitted by law, the maker of Valutio is not liable for any loss or damage - including financial loss, lost profits, or lost or corrupted data - arising from your use of, or inability to use, the app.</div>' +
       '<div class="help-box" style="margin:0 0 14px"><strong>Your data is yours.</strong> Everything you enter is stored locally on this device and is never collected or sent to us; the only network requests fetch live market prices and exchange rates. You are responsible for your own backups - clearing your browser data or uninstalling will erase your records, so use Settings &rarr; Backups to keep copies.</div>' +
-      '<div class="help-box" style="margin:0"><strong>Free &amp; open source.</strong> Valutio is free and open source - there are no purchases, subscriptions or accounts. If it is useful to you, tips are welcome via <a href="https://ko-fi.com/salvatoresorvillo" target="_blank" rel="noopener">Ko-fi</a> (entirely optional). See our <a href="https://valutio.app/terms" target="_blank" rel="noopener">Terms</a> and <a href="https://valutio.app/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</div>' +
+      '<div class="help-box" style="margin:0"><strong>Free &amp; open source.</strong> Created and maintained by <strong>Salvatore Sorvillo</strong><span>.</span> Valutio is free and open source - there are no purchases, subscriptions or accounts. If it is useful to you, tips are welcome via <a href="https://ko-fi.com/salvatoresorvillo" target="_blank" rel="noopener">Ko-fi</a> (entirely optional). See our <a href="https://valutio.app/terms" target="_blank" rel="noopener">Terms</a> and <a href="https://valutio.app/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</div>' +
       '</div>';
     // Settings groups Profile + Currencies & FX into one top row; the wizard keeps them stacked.
     if (isWizard) {
@@ -8509,8 +8510,51 @@
     }
   }
   var _lastViewKey = null;   // tracks route (+ settings sub-section) so a page change can jump back to the top
+  var _settingsNavScrollLeft = 0;
+  function captureSettingsNavScroll() {
+    var nav = document.querySelector(".settings-nav");
+    if (nav && window.innerWidth <= 1024) _settingsNavScrollLeft = nav.scrollLeft;
+  }
+  function restoreSettingsNavScroll() {
+    var nav = document.querySelector(".settings-nav");
+    var active = nav && nav.querySelector(".settings-nav-item.active");
+    if (!nav || !active || window.innerWidth > 1024) return;
+    var maxScroll = Math.max(0, nav.scrollWidth - nav.clientWidth);
+    nav.scrollLeft = Math.min(_settingsNavScrollLeft, maxScroll);
+    var navBox = nav.getBoundingClientRect();
+    var activeBox = active.getBoundingClientRect();
+    if (activeBox.left < navBox.left) {
+      nav.scrollLeft = Math.max(0, nav.scrollLeft - (navBox.left - activeBox.left) - 6);
+    } else if (activeBox.right > navBox.right) {
+      nav.scrollLeft = Math.min(maxScroll, nav.scrollLeft + (activeBox.right - navBox.right) + 6);
+    }
+    _settingsNavScrollLeft = nav.scrollLeft;
+  }
+  function revealActiveMobileNav() {
+    var nav = document.querySelector(".nav");
+    var active = nav && nav.querySelector(".nav-item.active");
+    if (!nav || !active || window.innerWidth > 1024) return;
+    var left = active.offsetLeft;
+    var right = left + active.offsetWidth;
+    var visibleLeft = nav.scrollLeft;
+    var visibleRight = visibleLeft + nav.clientWidth;
+    if (left < visibleLeft || right > visibleRight) {
+      nav.scrollLeft = Math.max(0, left - (nav.clientWidth - active.offsetWidth) / 2);
+    }
+  }
+  var _mobileNavResizeQueued = false;
+  window.addEventListener("resize", function () {
+    if (_mobileNavResizeQueued) return;
+    _mobileNavResizeQueued = true;
+    window.requestAnimationFrame(function () {
+      _mobileNavResizeQueued = false;
+      revealActiveMobileNav();
+      restoreSettingsNavScroll();
+    });
+  });
   function render() {
     var app = document.getElementById("app");
+    captureSettingsNavScroll();
     applyThemeChrome();
     if (!db.setupComplete || state.previewWizard) {
       // Setup opens from the top on first paint, but re-renders triggered by toggling
@@ -8535,6 +8579,8 @@
     app.innerHTML = sidebar() + '<div class="main">' + backupBanner() + page() + "</div>";
     renderTutorial();
     applyLanguageUI(document);
+    revealActiveMobileNav();
+    restoreSettingsNavScroll();
     if (viewChanged) window.scrollTo(0, 0);
   }
 
