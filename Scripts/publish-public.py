@@ -51,9 +51,12 @@ EXCLUDE_PATTERNS = (
 )
 
 
+PUBLIC_DOT_PATHS = {".gitignore", ".github"}
+
+
 def should_skip(path: Path, root: Path, named_excludes: set[str]) -> bool:
     rel = path.relative_to(root)
-    if any(part.startswith(".") and part != ".gitignore" for part in rel.parts):
+    if any(part.startswith(".") and part not in PUBLIC_DOT_PATHS for part in rel.parts):
         return True
     if any(part in named_excludes for part in rel.parts):
         return True

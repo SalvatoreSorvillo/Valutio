@@ -1,5 +1,7 @@
 # Valutio Maintainer Guide
 
+Valutio was created and is maintained by **Salvatore Sorvillo**.
+
 This is the technical source of truth for changing Valutio safely. Read it before editing application logic, stored data, financial calculations, imports, themes, translations, service-worker behavior, or release scripts.
 
 The code and regression tests remain authoritative. If behavior changes, update this guide in the same change. If this guide disagrees with the code, investigate the discrepancy instead of choosing whichever behavior is more convenient.
@@ -8,9 +10,9 @@ The code and regression tests remain authoritative. If behavior changes, update 
 
 Valutio is a free, open-source, local-first personal finance application. It tracks accounts, net worth, investments, cash flow, debts, assets, goals, history, retirement projections, and configurable tax estimates.
 
-The product contract is:
+The community-app product contract is:
 
-- No account, cloud database, bank connection, or subscription.
+- No required account or subscription, cloud database, or bank connection.
 - Wallet data is stored on the user's device.
 - The app works offline after its shell has been cached.
 - Network access is optional and used for FX, investment prices, benchmark data, and external links. Financial records are not sent to those providers.
@@ -20,7 +22,7 @@ The product contract is:
 - English and Italian are supported display languages.
 - Dark, light, and dim themes must remain functionally equivalent.
 
-Do not add authentication, remote persistence, telemetry, analytics, bank connections, or background data upload without an explicit product decision.
+Do not add authentication, remote persistence, telemetry, analytics, advertising, bank connections, or background data upload without an explicit product decision and synchronized privacy, legal, English, and Italian copy updates. Optional services offered separately from the community app must not silently change its local-first data boundary.
 
 ## 2. Non-Negotiable Financial Invariants
 
@@ -28,18 +30,19 @@ These rules protect user balances and history:
 
 1. Never reinterpret the FX convention. A rate is the number of base-currency units represented by one unit of the native currency.
 2. Never calculate sold quantity, cost basis, or realized profit from array order. Always use canonical sorted transaction order.
-3. Never allow a transaction ledger to sell more shares than it held at that point in time.
+3. Never allow a transaction ledger to sell more shares than it held at that point in time. Replay persisted share quantities with exact decimal arithmetic for this check; do not add a floating-point tolerance.
 4. Preserve user-entered decimal strings in JSON. Crypto quantities may contain 18 decimal places.
 5. Closed net-worth snapshots do not revalue at today's prices or FX.
 6. An archived tax year uses its own country, currency, fiscal window, inputs, locked invoice conversions, and captured income sources.
 7. Capital losses offset capital gains only. They must not reduce ordinary income.
 8. Capital losses are applied before any long-term capital-gains discount.
 9. New trades require valid exact dates. Legacy month-only trades retain month precision and conservative holding-period treatment.
-10. Full JSON restore is replacement. Cash-flow CSV or Excel import is append-only, deduplicated, and must not replace unrelated wallet data.
+10. Full JSON restore is replacement. Validate the untouched JSON payload before migration so malformed financial input cannot be silently normalized. Cash-flow CSV or Excel import is append-only, deduplicated, and must not replace unrelated wallet data.
 11. Invalid or out-of-year invoices must not silently enter tax calculations.
 12. Linked debt must not be subtracted twice from an equity-mode asset.
 13. Fully sold holdings retain history but are excluded from live quote refresh.
 14. Every app release must bump all cache identifiers described below.
+15. A dividend-reinvestment reconciliation is one indivisible buy/dividend pair. Never save, import, edit, delete, or undo only one side, and never replace the ledger with a raw share-total override.
 
 Any change touching these invariants needs a deterministic regression test before release.
 
@@ -56,9 +59,11 @@ The readable source folder is the only place to edit the application.
 | `app.css` | Layout, components, tables, responsive behavior, and theme tokens |
 | `sw.js` | Offline shell, cache version, updates, and fetch strategy |
 | `manifest.webmanifest` | PWA metadata |
+| `LICENSE` | Unmodified GNU AGPL v3 license text for the application |
+| `.github/PULL_REQUEST_TEMPLATE.md` | Pull-request checklist and explicit CLA acknowledgement |
 | `Templates/` | Full workbook and cash-flow templates |
 | `Icons/` | Brand and PWA icons |
-| `Fonts/` | Self-hosted Hanken Grotesk and Material Symbols Rounded |
+| `Fonts/` | Self-hosted Hanken Grotesk and Material Symbols Rounded, with their third-party license notices |
 | `Vendor/` | Vendored SheetJS and license |
 | `Vendor/pdfjs/` | Pinned PDF.js runtime and Apache-2.0 license for offline statement text extraction |
 | `Rules/statement-categorizer-defaults.json` | Default expense keywords, exclusions, and reversal terms |
@@ -120,7 +125,7 @@ Do not render before asynchronous storage loading finishes. That can briefly sho
 - IndexedDB database: `valutio`
 - Object store: `kv`
 - Wallet key: `wallet_app_v1`
-- Current schema: `2`
+- Current schema: `3`
 - localStorage uses the same key only for legacy migration or fallback.
 
 `save()` captures `JSON.stringify(db)` synchronously, writes it to IndexedDB asynchronously, and falls back to localStorage if IndexedDB fails.
@@ -134,6 +139,10 @@ wallet_app_v1_corrupt_<timestamp>
 Preserve that quarantine behavior.
 
 `migrate(d)` must be idempotent, additive, and deterministic. Migrations must preserve valid unknown fields, unused currencies, decimal strings, IDs, archived tax ownership, and retirement inputs. Add a marker under `meta.migrations`, validate afterward, and add regression fixtures for the prior schema.
+
+Schema 3 adds optional dividend-reinvestment provenance and the snapshot contribution-cost split. Migration records `meta.migrations.v3`, leaves every pre-existing unlinked buy and dividend semantically unchanged, and treats a legacy snapshot without `contributionCost` as `cost` until that snapshot is intentionally rebuilt or edited.
+
+The active tax record also carries managed-preset provenance. Migration may infer a missing `presetManaged` marker only when the saved threshold, brackets, levy label/rate, capital-gains rate/discount, and discount period exactly match a known preset variant. A customized record must remain customized; migration must never overwrite it merely because its country matches a built-in preset.
 
 ## 6. Canonical Wallet Schema
 
@@ -204,7 +213,10 @@ Important fields:
 Transaction:
 
 ```text
-{ id, type, shares, price, fees, date?, month, datePrecision, sequence, note? }
+{
+  id, type, shares, price, fees, date?, month, datePrecision, sequence, note?,
+  origin?, linkId?
+}
 ```
 
 - Type is `buy` or `sell`.
@@ -213,14 +225,17 @@ Transaction:
 - Legacy month-only records omit date and use month precision.
 - `sequence` resolves same-day and legacy same-month order.
 - Shares, price, and fees may be normalized decimal strings.
+- `origin: "drp"` and `linkId` identify the acquisition half of a dividend-reinvestment pair. Other transactions omit both fields.
 
 Dividend:
 
 ```text
-{ id, month, amount, note? }
+{ id, date?, month, amount, note?, origin?, linkId? }
 ```
 
-Its currency is the parent holding currency.
+Its currency is the parent holding currency. New DRP dividends require an exact `date`; ordinary legacy dividends may remain month-only. `origin: "drp"` and the same `linkId` identify the income half of a dividend-reinvestment pair.
+
+A DRP `linkId` is unique and must resolve, inside one holding, to exactly one positive buy and one positive dividend. Both rows require the same exact date and month. The buy has zero fees and its cost equals the linked dividend amount, subject only to preserved decimal representation and normal calculation precision.
 
 ### `physicalAssets`
 
@@ -285,9 +300,11 @@ Current pension/super balance is derived from matching accounts in the active re
   capitalGainsDiscountMonths, deductions, employmentIncome,
   employmentTaxPaid, otherIncome, capitalLossCarryIn,
   capitalLossCarryOut, sourceSnapshot, invoices, adjustments,
-  paid?, paidAt?
+  presetManaged?, presetVersion?, paid?, paidAt?
 }
 ```
+
+`presetManaged: true` means the active record still follows Valutio's built-in planning preset. `presetVersion` identifies the country/year variant last applied. Saving annual user inputs such as employment income or tax paid does not clear a matching managed marker. Changing any preset-controlled threshold, bracket, levy, or capital-gains field sets `presetManaged` to false and removes `presetVersion`; explicitly choosing a country preset restores managed status. Archived records remain year-owned and are never automatically upgraded.
 
 Bracket:
 
@@ -317,13 +334,14 @@ Modern snapshots can include:
 
 ```text
 {
-  month, date, netWorth, gross, invest, cost, unrealized, realized,
+  month, date, netWorth, gross, invest, cost, contributionCost,
+  unrealized, realized,
   income, expenses, buckets, accounts, holdings, debts, debtsTotal,
   rates, physAssets, unmatched, unmatchedBase
 }
 ```
 
-Per-line native values and frozen rates are important. Aggregate-only legacy snapshots remain supported and can be materialized into synthetic rows before an explicit frozen-row edit.
+Per-line native values and frozen rates are important. Holding lines also carry `contributionCost` when available. The frozen-holding editor exposes this value as External contribution cost so changing shares or average buy price cannot silently leave a stale performance input. Aggregate-only legacy snapshots remain supported and can be materialized into synthetic rows before an explicit frozen-row edit. A missing legacy `contributionCost` falls back to `cost`; migration must not retrospectively guess which historical buys were reinvestments.
 
 ## 7. Money, FX, and Ownership
 
@@ -335,11 +353,11 @@ fromBase(amount, code) = amount / currency.rate
 convert(a, from, to)   = fromBase(toBase(a, from), to)
 ```
 
-For past months, use `rateForMonth()` or `toBaseAtMonth()`. Never use current FX when frozen FX exists. Changing base currency must rebase the pool so the new base equals 1 while preserving cross-rates.
+For past months, use `rateForMonth()`, `toBaseAtMonth()`, or `convertAtMonth()`. The last helper applies the same month's frozen source and target rates. Cash-flow totals and live tax derivations for historical interest, dividends, and realized gains must use the record month's frozen FX; never use current FX when a closed-month rate exists. Changing base currency must rebase the pool so the new base equals 1 while preserving cross-rates.
 
 Do not round intermediate tax or investment calculations merely for display. Round at modeled posting boundaries, debt cent persistence, spreadsheet export, and formatting. Most arithmetic still uses JavaScript Number. Decimal strings protect JSON round trips and BigInt-backed decimal logic protects oversell validation, but not every calculation is arbitrary precision.
 
-Accounts store full balances. My share multiplies joint records by share; Household multiplies by 1. Changing a live account share intentionally re-lenses matching historical account rows without changing frozen native balance or FX.
+Accounts store full balances. My share multiplies joint records by share; Household multiplies by 1. Changing a live account share intentionally re-lenses matching historical account rows. `snapshotForView()` must project that ownership delta at render time across account rows, allocation buckets, gross assets, and net worth without mutating the frozen native balance, close-time ownership, FX, debt, or persisted aggregate.
 
 Expense rows use the same view lens. Income does not currently apply a joint share. Changing that is a schema/product change.
 
@@ -347,7 +365,7 @@ Expense rows use the same view lens. Income does not currently apply a joint sha
 
 ### Canonical ordering
 
-All consumers must use the shared sorter: month, exact date, sequence, then stable legacy ordering where needed. Never use raw array order for financial replay.
+All consumers must use the shared sorter: month, exact date, sequence, then stable legacy ordering where needed. Never use raw array order for financial replay. Valutio-created ledgers are normally canonical already; the sorter checks that condition and skips the `O(n log n)` sort while still returning a copy. Imported or legacy out-of-order arrays take the deterministic sort path.
 
 ### Weighted-average cost
 
@@ -370,6 +388,22 @@ remaining cost = prior cost pool - cost removed
 
 A full close resets shares and cost so a later reopen starts a fresh average.
 
+### Dividend reinvestment reconciliation
+
+Reconcile Shares records broker-reported shares without overwriting the transaction ledger. The supported first version is full dividend reinvestment only:
+
+1. Read the current Valutio share total and accept a greater broker total.
+2. Derive `shares added = broker total - current total`; do not accept an arbitrary negative adjustment or direct total override.
+3. Require the exact allocation date and the total dividend reinvested. A new dividend may be created, or an existing unlinked dividend may be selected so the income is not counted twice.
+4. Derive `issue price = total dividend reinvested / shares added` and record a zero-fee buy.
+5. Save the buy and dividend with `origin: "drp"` and one shared `linkId`.
+
+Use this workflow only when the whole dividend bought the added shares. A statement with a cash remainder, brokerage fee, withholding, an extra cash contribution, or a taxable dividend different from the invested amount must be represented as a separate ordinary dividend and buy; do not approximate it as full DRP.
+
+Create, edit, delete, and undo are atomic across both linked rows. Editing preserves the row IDs and `linkId`. Deleting from either the Transactions or Dividends view removes both rows, and undo restores both at their original positions. Validate the complete candidate ledger before committing; an invalid edit must leave the wallet unchanged.
+
+The DRP buy increases the actual weighted-average tax cost pool and creates an exact-date acquisition lot. It does not increase `contributionCost`, which represents capital contributed from outside the holding for benchmark and time-weighted-return purposes. An ordinary sale reduces actual cost and contribution cost proportionally; a full close resets both.
+
 ### Holding period
 
 Tax cost basis stays weighted average, but long/short eligibility attributes sold shares to acquisition lots in FIFO order. Exact dates use exact anniversary logic. For the Australian 12-month rule, the sale must be after the anniversary, not on it. Ambiguous month-only boundaries are unknown and treated conservatively.
@@ -384,15 +418,20 @@ Current price is the saved live price. Previous price is prior-month data. Color
 
 - Unrealized P/L: market value minus remaining cost basis.
 - Realized P/L: ledger sale results plus legacy `realizedSeed`.
+- Displayed all-time Return %: `(unrealized P/L + realized P/L) / remaining cost basis`. Live holding rows, frozen rows, portfolio totals, and the all-time KPI must use this same denominator. The separately labeled current-month return remains a period market-move measure.
 - Annualized return: money-weighted XIRR over pooled buys, sells, dividends, and final market value.
 - XIRR is unavailable under 90 days, without both cash-flow signs, or without a supported root.
-- Time-weighted return chains period growth after removing net contributions and needs two valid periods.
+- Time-weighted return chains period growth after removing changes in snapshot `contributionCost` and needs two valid periods. Full DRP pairs contribute zero, but sale withdrawals remain an approximation until snapshots store explicit period cash flows.
 
 Month-only return flows use month-end, clamped to now for the open month. Historical flows use frozen monthly FX.
 
+A full DRP contributes an equal negative buy flow and positive dividend flow on the same exact date, so it is not external cash in XIRR. Tax and market cost still use the acquisition price derived from the reinvested amount.
+
+If the user accepts a holding-currency conversion, re-denominate the live price, legacy `realizedSeed`, transaction prices and fees, dividends, and every frozen holding's `buyPrice`, `fees`, `contributionCost`, `price`, and `realized` fields. Closed records use their month's frozen cross-rate and update their native currency/rate while preserving frozen base totals. A currency relabel without accepting conversion intentionally leaves numeric values unchanged.
+
 ### Benchmark
 
-Default is `ACWI`; ticker is editable. The comparison invests the same net contributions at monthly benchmark closes, uses adjusted close where available, caches about ten years, needs two priced points, and uses latest close for Now.
+Default is `ACWI`; ticker is editable. The comparison invests changes in snapshot `contributionCost` at monthly benchmark closes, uses adjusted close where available, caches about ten years, needs two priced points, and uses latest close for Now. Investment snapshots and trend calculations use `contributionCost`, not tax `cost`, so a DRP does not appear as new cash supplied by the user. Sale withdrawals are only approximated by the proportional contribution-cost reduction; use XIRR when ledger-exact sale and dividend cash flows matter.
 
 Benchmark/base-currency FX drift is deliberately not modeled. Stock splits, mergers, hard forks, wash sales, parcel elections, and other corporate actions are not automatic.
 
@@ -403,10 +442,10 @@ Gross assets include owned-view accounts, holdings, and included physical assets
 Equity-mode asset:
 
 ```text
-asset contribution = max(0, full value - linked debt)
+asset contribution = max(0, full value - sum of all linked debts)
 ```
 
-Its linked debt is not subtracted again; only underwater excess enters effective debt.
+Its linked debts are not subtracted again; only their combined underwater excess enters effective debt. Debt-page home equity is calculated once per linked property from the property value minus that same combined debt total, so first and second mortgages cannot duplicate or overstate the displayed equity.
 
 Full-mode asset:
 
@@ -477,18 +516,20 @@ PDF.js 6.1.200 is pinned and cached locally. Do not replace it with a network-on
 
 The live month rebuilds from live accounts, holdings, debts, assets, prices, rates, and cash flow.
 
-A closed month locks native records, positions, prices, base values, FX, debt totals, net worth, allocation, and investment totals. General recalculation skips it.
+A closed month locks native records, positions, prices, base values, FX, debt totals, net worth, allocation, actual cost, contribution cost, and investment totals. General recalculation skips it. Adding or changing a current DRP must not rewrite a closed snapshot.
 
 Intentional exceptions:
 
 1. Past cash-flow edits update snapshot income/expense totals so History table and category views agree.
 2. Explicit frozen-row account/holding edits retotal that month from stored per-line values without current-FX revaluation.
-3. Live account ownership changes re-lens history.
+3. Live account ownership changes re-lens history through a non-mutating render-time projection.
 4. Legacy snapshots lacking rates can receive one historical month-end FX backfill.
 
 Automatic catch-up starts no earlier than `meta.firstMonth`, applies recurring rows, closes debts, writes each missing month, and stops at a 240-month guard. After a long closed period, balances/prices can only use values known when the app reopens; recurring and debt progression still advance month by month.
 
 Closed snapshots without rates may fetch one month-end rate map from Frankfurter/ECB, stamp it, and remain frozen. Existing rates are never re-fetched.
+
+`walletHasData()` is the shared eligibility check for automatic snapshots, scheduled backups, and overdue-backup warnings. It must recognize accounts, holdings, physical assets, debts, cash-flow rows, goals, recurring rules, existing snapshots, active or archived tax data, and non-zero retirement inputs. A wallet does not lose snapshot or backup protection merely because it has no account or holding.
 
 ## 12. Tax Engine
 
@@ -500,9 +541,17 @@ Every tax record owns its country. Derive fiscal boundaries from that record, ne
 - ZA: 1 March to leap-aware February end.
 - Calendar regions: 1 January to 31 December.
 
+Built-in planning presets are selected for the tax record's own year. Australia uses a 16% first taxable band for 2025/26, 15% for 2026/27, and 14% from 2027/28. Other countries continue to use their current undated table until a dated table is added. Automatic rollover upgrades only a managed active preset. Annual income, tax-paid, deduction, loss, or adjustment inputs do not customize the rate preset; changing a preset-controlled threshold, bracket, levy, or capital-gains field does and prevents later automatic replacement. A rollover archives the prior annual inputs, then starts the new active year with empty invoices and zero employment income, employment tax paid, other income, and deductions; capital-loss carry and reusable rate/adjustment configuration follow their documented rules.
+
+Changing country aligns the active record to that country's current fiscal-year label without archiving or clearing annual user data. If that label already exists in `taxArchive`, block the country change instead of creating two records with the same year or applying a country to a mismatched label.
+
+Tax Settings changes are atomic: build and validate a cloned candidate, including scalar fields, brackets, and adjustments, and copy it onto the record only after every check succeeds. An invalid submission must leave the live or archived record byte-for-byte unchanged.
+
 `progressiveTax()` starts at threshold and applies each rate between the previous and absolute current cap. Validation requires 0-1 rates, increasing caps, and one final open-ended bracket.
 
 Ordinary sources include employment, other income, freelance invoices, interest, dividends, and taxable realized gains. Deductions cannot make taxable income negative. Progressive tax plus levy receives configured fixed/percent adjustments. Estimated tax floors at zero.
+
+Dividend tax-year selection prefers a valid exact dividend `date`. Month-only legacy dividends fall back to their stored `month`. A linked DRP dividend is ordinary dividend income exactly once; its paired buy must not create a second income source.
 
 ```text
 balance to pay = estimated tax - employment tax paid
@@ -513,6 +562,8 @@ Freelance set-aside uses marginal rate plus levy as a planning reserve.
 ### Invoices
 
 Invoices require exact valid dates and contribute only inside the record's fiscal window. Conversion order is matching currency, locked positive invoice `fxRate`, then live fallback only for legacy data without a lock.
+
+When a country preset or manual Tax Settings change updates the active tax currency, retarget every dated invoice lock by composing its old invoice-to-tax rate with the old-tax-to-new-tax cross-rate. This preserves the locked economic conversion instead of reinterpreting the invoice at today's FX. If an archived invoice lacks its own modern lock, editing another invoice must retain that row's captured `sourceSnapshot.invoiceAmounts` value rather than rebuild it at live FX.
 
 Migration moves an invoice to another known tax record when its date unambiguously belongs there. Otherwise it is flagged and excluded/warned, not silently taxed in the wrong year.
 
@@ -533,7 +584,7 @@ Capital losses never reduce ordinary income. `capitalGainsRate` is separate: it 
 
 ### Archives
 
-Archived `sourceSnapshot` locks interest, dividends, long/short/unknown gains and losses, converted invoices, and provenance. Later FX/ledger edits must not rewrite it. Legacy archives are reconstructed once with `legacy-reconstructed` provenance because deleted history cannot be recovered exactly.
+Archived `sourceSnapshot` locks interest, dividends, long/short/unknown gains and losses, converted invoices, and provenance. Later FX/ledger or DRP edits must not rewrite it. Legacy archives are reconstructed once with `legacy-reconstructed` provenance because deleted history cannot be recovered exactly.
 
 Carry-out becomes the next chronological year's carry-in. Unpaid archived balances remain in dashboard tax totals until marked paid. Rendering/navigation must not alter paid state.
 
@@ -573,13 +624,16 @@ Benchmark history also uses Yahoo `/yq`. Local proxy fallback may not preserve r
 
 `portableDb()` is a JSON clone of the complete database. Plain and encrypted JSON wrap the same payload.
 
-Exact JSON round trip must preserve settings, every currency, ownership, ledgers, decimal strings, dividends, realized seeds, assets, debts, goals, recurring, categories, retirement inputs, snapshots/rates, all tax records/source snapshots/invoice FX/paid state/carry, and idempotency metadata.
+Exact JSON round trip must preserve settings, every currency, ownership, ledgers, decimal strings, dividend dates, DRP `origin`/`linkId` pairs, realized seeds, assets, debts, goals, recurring, categories, retirement inputs, snapshots/rates including `contributionCost`, all tax records/source snapshots/invoice FX/paid state/carry, and idempotency metadata.
 
 Adding a stored field requires default, migration, validation if financial, JSON round-trip coverage, an explicit Excel-parity decision, and a guide update.
 
 Strict JSON restore:
 
-- rejects malformed explicit transaction/invoice dates;
+- runs a non-mutating preflight on the untouched payload before migration can normalize legacy fields;
+- rejects transaction types other than buy/sell, invalid months, malformed exact transaction/invoice dates, exact date/month disagreement, and exact trade dates in the future;
+- rejects malformed or non-positive transaction shares/prices and malformed or negative fees;
+- preserves valid legacy month-only trades and exact decimal strings;
 - rejects missing currency references;
 - runs migration and strict validation;
 - blocks unsafe errors;
@@ -601,9 +655,9 @@ Honor the envelope iteration count for compatibility. Browser storage itself is 
 
 ### Excel and CSV
 
-Excel is human-readable and rounded for spreadsheet use, not exact backup. Sheets include Summary, Currencies, Accounts, Finance, Holdings, Dividends, Incomes, Expenses, Tax, Retirement, and History. Retirement export must include salary, employer extra, and voluntary contribution.
+Excel is human-readable and rounded for spreadsheet use, not exact backup. Sheets include Summary, Currencies, Accounts, Finance, Holdings, Dividends, Incomes, Expenses, Tax, Retirement, and History. Retirement export must include salary, employer extra, and voluntary contribution. DRP provenance columns may support review and migration, but the workbook is not a fidelity guarantee for linked records or decimal strings; recommend JSON before and after spreadsheet migration.
 
-Full workbook import is a broad migration path after preview/validation. Cash-flow buttons use append-only import. Bare `$` formats derive AUD/USD from workbook context, not symbol alone.
+Full workbook import is a broad migration path after preview/validation. Its dry run executes under an unconditional rollback, clones the validated candidate for preview, and commits that candidate only after Apply. Cancelling, closing, or any parser/validation exception must leave the existing wallet unchanged. A linked DRP from Excel must either reconstruct one complete validated buy/dividend pair or be blocked in preview with guidance to use JSON. It must never silently import only one side, duplicate the dividend, or flatten the pair into an unlinked share correction. Cash-flow buttons use append-only import. Bare `$` formats derive AUD/USD from workbook context, not symbol alone.
 
 SheetJS 0.20.3 and PDF.js 6.1.200 are vendored for offline use. Keep both licenses. SheetJS retains its CDN fallback; PDF statement parsing is local-only.
 
@@ -615,7 +669,11 @@ Folder backup writes only to the chosen directory after a successful folder oper
 
 Permissive load may repair missing arrays/defaults, missing/duplicate IDs, missing sequence, missing ledger arrays, clamped shares, safe legacy normalization, and missing currency records with a warning.
 
-Strict import must block invalid dates, date/month disagreement, non-positive shares/prices/cash flow/dividends/invoices, negative fees/current prices, oversells, duplicate/invalid currencies, bad FX, malformed brackets, out-of-year invoices, and missing required currencies.
+Strict import must block invalid transaction types/months/dates, exact date/month disagreement, exact future trade dates, non-positive or malformed shares/prices/cash flow/dividends/invoices, malformed or negative fees, negative current prices, oversells, duplicate/invalid currencies, bad FX, malformed brackets, out-of-year invoices, and missing required currencies. Oversell replay uses decimal strings and BigInt-backed exact addition; there is no sub-micro-share tolerance. Legacy month-only transactions remain valid.
+
+Persisted financial validation also covers non-negative account balances and ownership shares, asset values, goal targets/savings, recurring amount/kind/start/share, debt balance/APR/payment, and tax thresholds, income, tax paid, deductions, carried losses, rates, discount months, bracket caps/rates, and adjustments. Apply the field's positive/non-negative rule explicitly rather than relying on HTML input constraints.
+
+Strict validation must also block a DRP orphan, duplicate link, non-buy transaction half, missing or unequal exact dates/months, mismatched holding, non-positive linked values, non-zero fee, or acquisition cost that does not match the linked dividend.
 
 Do not use `num()` as permission to silently turn malformed financial input into zero.
 
@@ -652,7 +710,13 @@ Tables must keep matching header/footer surfaces, normal body surfaces, consiste
 
 Selects hide native duplicate arrows and show one app arrow. Menus remain themed/readable in all modes.
 
+Every form control needs a programmatic accessible name. Prefer an explicit `for`/`id` association; the runtime label-association pass is a compatibility safety net for existing `.field > label` markup. Current route/section items expose `aria-current`, and segmented, language, theme, and chip controls expose `aria-pressed`. Keyboard focus must remain visible with a high-contrast focus ring, including hover-revealed row actions through `:focus-within`.
+
+Standard, bare, and tutorial dialogs must have an accessible name, move focus to a useful initial control, trap Tab while open, close on Escape where safe, and return focus to the invoker. Destructive controls are semantic buttons. Material deletion (transactions, dividends, invoices, categories, holdings, accounts, goals, assets, debts, Cash Flow rows, recurring rules, and removable currencies) uses a danger-styled confirmation plus an accessible Undo action. Undo remains available until the user chooses Undo/Dismiss or another toast replaces it, restores the original collection position, and returns linked records such as a DRP pair together. Reset actions use danger styling. Respect `prefers-reduced-motion` by disabling nonessential shimmer and transitions, and keep text, controls, muted copy, semantic status text, and chart labels at WCAG AA contrast in all themes.
+
 At 1024 CSS pixels and below, the application uses the responsive shell: a compact sticky summary header, horizontally scrollable utility and bottom route rails, single-column content where needed, and safe-area padding. Wide financial tables retain all columns inside their own horizontal scroll wrappers and must never widen or clip the document. Touch targets are at least 44px, and actions that are hover-revealed on desktop remain visible on coarse or non-hover pointers.
+
+At narrow widths, text may wrap, ellipsize, or clip inside a deliberately constrained control, and dense tables/charts may scroll inside their own component; text must never overlap neighboring content or widen the document. Keep first/last chart labels inset from the plot edges so axis and period labels do not collide.
 
 ## 19. Privacy and Security
 
@@ -667,6 +731,7 @@ Wallet data is origin-sandboxed browser data but is readable by JavaScript on th
 - Provider requests can disclose symbols/coin IDs/currencies, never balances, transactions, taxes, or notes.
 - Service-worker caches contain assets, not wallet data.
 - Preserve AGPL headers and third-party licenses.
+- Deployed builds must include the root `LICENSE`, the font notices, and working Legal-panel links to the public source and license. Minification removes source comments, so headers alone are not sufficient for a distributed build.
 
 Follow `Rules/SECURITY.md`; never request real backups in public issues.
 
@@ -675,6 +740,8 @@ Follow `Rules/SECURITY.md`; never request real backups in public issues.
 Main risks are repeated transaction replay, nested snapshot scans, huge HTML tables, whole-wallet serialization on rapid input, unnecessary archive recalculation, main-thread spreadsheet parsing, and oversized charts.
 
 The suite guards a 100,000-transaction metrics run. This is a warning threshold, not a universal device promise.
+
+Canonical Valutio ledgers use an ordered-array fast path: verify adjacent canonical order and bypass sorting when already ordered. Keep the deterministic sort for imported or legacy arrays. `render()` may memoize sorted ledgers and current holding metrics only inside one synchronous render call, keyed by the holding object, and must discard every map in `finally`. Never reuse that cache in action, import, refresh, rebase, snapshot, or later-render calculations: holdings, nested rows, prices, realized seeds, currencies, and FX rates are intentionally mutated in place.
 
 Optimize with explicit invalidation and result comparison. Never cache across ledger, FX, ownership, snapshot, or tax-source changes without invalidation. Prefer indexed maps over nested scans. Do not trade financial correctness for render speed.
 
@@ -693,7 +760,7 @@ node .\Scripts\generate-stress-wallet.mjs $stressWallet
 node .\Scripts\validate-wallet-backup.mjs $stressWallet
 ```
 
-Current financial coverage includes calendar validation, invoice-date preflight, dollar-format context, fiscal boundaries, same-day ordering, close/reopen basis, CGT anniversary, capital-loss isolation/order/five-year carry, out-of-year invoices, archive and invoice-FX migration, unused currency and 18-decimal preservation, retirement and statement-rule migration, statement apply idempotency, sold-out refresh exclusion, bracket validation, oversell detection, backup currency completeness, and a 100,000-transaction guard. The statement suite separately covers date/money parsing, debit/credit CSV direction, Personal/Joint ownership, exclusions, reversals, overlaps, encodings, keyword categories and per-transaction apply rows.
+Current financial coverage includes calendar validation, raw strict-import metadata/numeric checks, future trades, exact decimal oversells, invoice-date preflight, dollar-format context, fiscal boundaries, year-aware managed/custom tax presets, atomic Tax Settings and Excel rollback, same-day ordering, close/reopen basis, consistent all-time Return %, CGT anniversary, capital-loss isolation/order/five-year carry, frozen-month cash-flow/tax FX, out-of-year invoices, invoice-lock retargeting and archive preservation, full holding redenomination, non-mutating ownership projection, multi-mortgage equity, broad snapshot/backup eligibility, unused currency and 18-decimal preservation, retirement and statement-rule migration, statement apply idempotency, sold-out refresh exclusion, bracket validation, backup currency completeness, and a 100,000-transaction guard. DRP coverage must include v2-to-v3 migration, long-decimal JSON fidelity, pair validation, actual cost versus contribution cost, exact acquisition and tax dates, one dividend-income inclusion, equal-and-opposite XIRR flows, benchmark/TWR exclusion, ID/link preservation on edit, atomic delete/undo, no mutation after an invalid edit, frozen snapshot/archive stability, and safe Excel handling. The statement suite separately covers date/money parsing, debit/credit CSV direction, Personal/Joint ownership, exclusions, reversals, overlaps, encodings, keyword categories and per-transaction apply rows.
 
 Manual matrix:
 
@@ -705,6 +772,7 @@ Manual matrix:
 - base/secondary currency change;
 - CRUD for every entity;
 - buy/sell/dividend/price/full close/reopen;
+- DRP reconcile/create/edit/delete/undo, existing-dividend linking, validation errors, closed months, and full/partial-reinvestment guidance;
 - provider success/partial failure/offline;
 - active/archive tax, invoice CRUD, settings, paid state, rollover;
 - retirement region/account binding;
@@ -715,7 +783,9 @@ Manual matrix:
 - backup folder/download;
 - reset/setup restart;
 - update prompt/offline reload;
-- narrow/wide tables and rightmost actions/footers.
+- narrow/wide tables and rightmost actions/footers;
+- 320px mobile pages and dialogs with long English/Italian text, internal table scrolling, clipped/ellipsized content without overlap, and inset chart-edge labels;
+- keyboard-only navigation, visible focus, dialog focus trap/return/Escape, selected-state announcements, destructive confirmation/Undo integrity, and reduced-motion mode.
 
 Use synthetic data only.
 
@@ -727,23 +797,23 @@ Default, migrate, validate, wire UI, test JSON/encryption, decide Excel parity, 
 
 ### Investment math
 
-Test buys, partial sell, fees, full close, reopen, same-day order, month-only legacy, decimal strings, oversell, and sold-out history. Confirm detail, totals, snapshots, tax, returns, and exports use the same ledger.
+Test buys, partial sell, fees, full close, reopen, same-day order, month-only legacy, decimal strings, oversell, and sold-out history. For DRP, test one atomic pair, actual versus contribution cost, exact date, dividend tax, returns, benchmark, edit/delete/undo, malformed restore, frozen state, JSON fidelity, and Excel safety. Confirm detail, totals, snapshots, tax, returns, and exports use the same ledger.
 
 ### Tax math
 
-Test fiscal boundaries, records with different countries, locked invoice FX, gains/losses/unknown periods/discount order/carry, paid state, and source capture. Never mutate archives during render.
+Test fiscal boundaries, year-aware managed presets versus manually customized records, atomic settings rejection, records with different countries, locked invoice FX and currency retargeting, gains/losses/unknown periods/discount order/carry, paid state, and source capture. Never mutate archives during render.
 
 ### FX
 
-Test rate convention, rebase, cross-rates, current/frozen months, invoice FX, provider currency/minor units, and missing-currency import rejection.
+Test rate convention, rebase, cross-rates, current/frozen months, historical cash-flow and tax sources, invoice lock retargeting, full live/frozen holding redenomination, provider currency/minor units, and missing-currency import rejection.
 
 ### Snapshot
 
-Test live rebuild, closed lock, past cash-flow edit, explicit frozen row edit, current price/FX change, ownership re-lens, and multi-month recurring/debt catch-up.
+Test live rebuild, closed lock, past cash-flow edit, explicit frozen row edit, current price/FX change, non-mutating ownership projection in My share and Household, non-account wallet eligibility, and multi-month recurring/debt catch-up.
 
 ### Visible text
 
-Add canonical English plus exact/pattern Italian. Test fixed-height setup, all themes, narrow width, and empty/error/success states.
+Add canonical English plus exact/pattern Italian. Test fixed-height setup, all themes, narrow width, accessible labels/focus/dialog behavior, reduced motion, and empty/error/success states.
 
 ### Table
 
@@ -761,7 +831,7 @@ sw.js asset query strings = ?v=NNN
 index.html app.css/app.i18n.js/app.js query strings = ?v=NNN
 ```
 
-The version when this guide was written is 477. Increment it for the next app release.
+The version when this guide was written is 482. Increment it for the next app release.
 
 Normal release:
 
@@ -812,10 +882,12 @@ Never build from or hand-edit a generated folder.
 - Encrypted backups have no password recovery.
 - Most arithmetic uses JavaScript Number.
 - Weighted average is not every jurisdiction's allowed tax method.
+- Reconcile Shares models full dividend reinvestment only. Cash remainders, fees, withholding, extra contributions, and differing taxable/reinvested amounts require separate ordinary dividend and buy records.
 - Wash sales, splits, mergers, hard forks, return of capital, and corporate actions are not automated.
 - Tax presets are estimates, not complete returns.
 - Retirement assumptions are fixed and region constants are dated.
 - Benchmark ignores benchmark/base FX drift.
+- Benchmark and time-weighted return approximate sale withdrawals from contribution-cost changes rather than exact sale proceeds; XIRR uses the exact ledger cash flows.
 - Month-only trades cannot prove exact anniversaries.
 - Closed-browser catch-up cannot reconstruct unknown historical balances/prices.
 - Providers can be delayed, limited, wrong, or unavailable.

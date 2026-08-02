@@ -33,7 +33,7 @@ sublicense, and distribute your Contribution and any derivative works.
 You agree that the Maintainer may license or **relicense** your Contribution as
 part of the Project under **any license terms, including proprietary terms**.
 This lets the Maintainer distribute the Project under its current open-source
-license (the GNU Affero General Public License v3.0) and, if needed, also offer
+license (the GNU Affero General Public License v3.0 or later) and, if needed, also offer
 the Project or parts of it under separate commercial terms to sustain
 development. You will not receive any payment or royalty for this.
 

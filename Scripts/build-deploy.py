@@ -23,23 +23,27 @@ except ImportError:
 
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY = os.path.abspath(os.path.join(SRC, "..", "valutio-deploy", "app"))
-FILES = ["index.html", "sw.js", "manifest.webmanifest"]
+FILES = ["index.html", "sw.js", "manifest.webmanifest", "LICENSE"]
 DIRS = ["Templates", "Icons", "Fonts", "Vendor", "Rules", "Deploy"]
-OBSOLETE = [
-    "Wallet_Template.xlsx", "expenses_template_valutio.xlsx",
-    "icon-192.png", "icon-512.png", "icon-maskable-512.png",
-    "VO_ICON", "fonts",
-]
+def prepare_deploy_dir():
+    """Recreate only the generated app payload before copying current files.
 
-def remove_path(path):
-    if os.path.isdir(path):
-        shutil.rmtree(path)
-    elif os.path.exists(path):
-        os.remove(path)
+    The parent deploy folder also contains Netlify functions and website
+    assets, so never remove it here. Rebuilding the app directory exactly
+    prevents deleted source files from surviving in a later deployment.
+    """
+    deploy_name = os.path.basename(os.path.normpath(DEPLOY)).lower()
+    parent_name = os.path.basename(os.path.dirname(os.path.normpath(DEPLOY))).lower()
+    if deploy_name != "app" or parent_name != "valutio-deploy":
+        sys.exit("Refusing to rebuild unexpected deploy path: " + DEPLOY)
+    if os.path.isdir(DEPLOY):
+        shutil.rmtree(DEPLOY)
+    elif os.path.exists(DEPLOY):
+        os.remove(DEPLOY)
+    os.makedirs(DEPLOY, exist_ok=True)
 
 def main():
-    if not os.path.isdir(DEPLOY):
-        sys.exit("Deploy folder not found: " + DEPLOY)
+    prepare_deploy_dir()
     src = open(os.path.join(SRC, "app.js"), encoding="utf-8").read()
     mini = rjsmin.jsmin(src)
     open(os.path.join(DEPLOY, "app.js"), "w", encoding="utf-8", newline="").write(mini)
@@ -60,8 +64,6 @@ def main():
     open(os.path.join(DEPLOY, "app.css"), "w", encoding="utf-8", newline="").write(cmini)
     print("app.css %d -> %d bytes (%.0f%% smaller, comments stripped)"
           % (len(css), len(cmini), 100 * (1 - len(cmini) / len(css))))
-    for name in OBSOLETE:
-        remove_path(os.path.join(DEPLOY, name))
     for f in FILES:
         shutil.copy2(os.path.join(SRC, f), os.path.join(DEPLOY, f))
     for d in DIRS:

@@ -35,6 +35,10 @@ py .\Scripts\build-deploy.py
 ## Pull requests
 
 By opening a pull request, you agree to the terms in `Rules/CLA.md`.
+Do not merge an outside contribution until the contributor has explicitly
+checked the CLA acknowledgement in the pull-request template. Keep that assent
+in the pull-request record so the Project can continue to offer compatible
+open-source and commercial licensing in the future.
 
 Good pull requests usually include:
 

@@ -1,9 +1,10 @@
 /* Valutio service worker: makes the app installable and fully offline.
    App shell is cached; market-data API calls always go to the network. */
-var CACHE = "valutio-v481";
+var CACHE = "valutio-v485";
 var ASSETS = [
-  "./", "./index.html", "./app.css?v=481", "./app.i18n.js?v=481", "./statement-categorizer.js?v=481", "./app.js?v=481",
+  "./", "./index.html", "./app.css?v=485", "./app.i18n.js?v=485", "./statement-categorizer.js?v=485", "./app.js?v=485",
   "./manifest.webmanifest",
+  "./LICENSE",
   "./Icons/icon-192.png", "./Icons/icon-512.png", "./Icons/icon-maskable-512.png",
   "./Templates/Wallet_Template.xlsx", "./Templates/expenses_template_valutio.xlsx",
   "./Vendor/xlsx.full.min.js", "./Vendor/SHEETJS-LICENSE.txt",
@@ -13,6 +14,8 @@ var ASSETS = [
   "./Fonts/material-symbols-rounded.woff2",
   "./Fonts/hanken-grotesk-latin.woff2",
   "./Fonts/hanken-grotesk-latin-ext.woff2",
+  "./Fonts/THIRD_PARTY_NOTICES.md",
+  "./Fonts/OFL-HANKEN-GROTESK.txt",
 ];
 
 self.addEventListener("install", function (e) {

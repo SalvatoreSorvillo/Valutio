@@ -33,7 +33,7 @@
 
   function defaultDB() {
     return {
-      version: 2,
+      version: 3,
       setupComplete: false,
       meta: { lastBackup: 0, backupSnooze: 0, customYears: [], customMonths: [], lastNotifyMonth: "", recurringApplied: {} },
       settings: {
@@ -96,10 +96,12 @@
       tax: {
         year: auFYLabel(),  // e.g. "2025/26" (AU financial year, Jul-Jun)
         country: "AU",      // the country whose fiscal-year window this record uses (archived years keep their own)
+        presetManaged: true,
+        presetVersion: "AU-" + auFYLabel(),
         currency: "",
         taxFreeThreshold: 18200,
         brackets: [
-          { upTo: 45000, rate: 0.16 },
+          { upTo: 45000, rate: parseInt(auFYLabel().slice(0, 4), 10) >= 2027 ? 0.14 : (parseInt(auFYLabel().slice(0, 4), 10) >= 2026 ? 0.15 : 0.16) },
           { upTo: 135000, rate: 0.30 },
           { upTo: 190000, rate: 0.37 },
           { upTo: null, rate: 0.45 },
@@ -308,10 +310,12 @@
     };
     scrubImported(d.expenses, d.expenseCategories);
     scrubImported(d.incomes, d.incomeCategories);
+    upgradeManagedActiveTaxPreset(d);
     normalizeTaxHistory(d);
-    d.version = 2;
+    d.version = 3;
     d.meta.migrations = d.meta.migrations || {};
     if (!d.meta.migrations.v2) d.meta.migrations.v2 = { at: new Date().toISOString(), note: "Added deterministic trade ordering and immutable archived tax inputs." };
+    if (!d.meta.migrations.v3) d.meta.migrations.v3 = { at: new Date().toISOString(), note: "Added linked dividend-reinvestment events and contribution-aware investment performance." };
     return validateDb(d, { repair: true, strict: false, source: "load" }).db;
   }
   function save() {
@@ -419,12 +423,23 @@
     var p = s.split("."), whole = (p[0] || "0").replace(/^0+(?=\d)/, ""), frac = (p[1] || "").replace(/0+$/, "");
     return (neg ? "-" : "") + whole + (frac ? "." + frac : "");
   }
+  function decimalNumber(v) {
+    if (typeof v === "number") return isFinite(v) ? v : null;
+    var s = String(v == null ? "" : v).trim();
+    if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(s)) return null;
+    var n = Number(s);
+    return isFinite(n) ? n : null;
+  }
   function validMonthString(v) { return /^\d{4}-(0[1-9]|1[0-2])$/.test(String(v || "")); }
   function validDateString(v) {
     var s = String(v || ""), m = /^(\d{4})-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])$/.exec(s);
     if (!m) return false;
     var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
     return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
+  }
+  function localDateString(value) {
+    var d = value || new Date(), pad = function (n) { return String(n).padStart(2, "0"); };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
   }
   function finiteNumber(v) { var n = typeof v === "number" ? v : parseFloat(v); return isFinite(n) ? n : 0; }
   function normalizeTransactionHistory(h) {
@@ -457,6 +472,108 @@
       submitLabel: "Close",
     });
   }
+  function drpPairValidationErrors(wallet) {
+    var links = {}, errors = [];
+    function add(linkId, kind, h, row, index) {
+      var id = String(linkId || "").trim();
+      var label = h.name || h.ticker || h.id || "Holding";
+      if (!id) {
+        errors.push(label + " " + kind + " " + (index + 1) + " has DRP metadata but no link id.");
+        return;
+      }
+      var group = links[id] || (links[id] = { txns: [], dividends: [] });
+      group[kind === "transaction" ? "txns" : "dividends"].push({ h: h, row: row, index: index, label: label });
+    }
+    ((wallet && wallet.holdings) || []).forEach(function (h) {
+      (h.transactions || []).forEach(function (t, i) {
+        if (t && (t.origin === "drp" || String(t.linkId || "").trim())) add(t.linkId, "transaction", h, t, i);
+      });
+      (h.dividends || []).forEach(function (d, i) {
+        if (d && (d.origin === "drp" || String(d.linkId || "").trim())) add(d.linkId, "dividend", h, d, i);
+      });
+    });
+    Object.keys(links).forEach(function (linkId) {
+      var group = links[linkId];
+      if (group.txns.length !== 1 || group.dividends.length !== 1) {
+        errors.push("DRP link " + linkId + " must connect exactly one buy and one dividend.");
+        return;
+      }
+      var tr = group.txns[0], dv = group.dividends[0], t = tr.row, d = dv.row;
+      if (tr.h !== dv.h) errors.push("DRP link " + linkId + " crosses two holdings.");
+      if (t.origin !== "drp" || d.origin !== "drp") errors.push("DRP link " + linkId + " must mark both rows as dividend reinvestment.");
+      if (t.type !== "buy") errors.push("DRP link " + linkId + " must use a buy transaction.");
+      if (!validDateString(t.date) || !validDateString(d.date)) errors.push("DRP link " + linkId + " needs the same exact allocation date on both rows.");
+      else if (t.date !== d.date) errors.push("DRP link " + linkId + " has mismatched allocation dates.");
+      if (String(t.month || "") !== String(d.month || "")) errors.push("DRP link " + linkId + " has mismatched months.");
+      var fees = decimalNumber(t.fees);
+      if (fees !== 0) errors.push("DRP link " + linkId + " cannot include fees in the full-reinvestment model.");
+      var shares = decimalNumber(t.shares), price = decimalNumber(t.price), amount = decimalNumber(d.amount);
+      if (!(shares > 0) || !(price > 0) || !(amount > 0)) errors.push("DRP link " + linkId + " needs positive shares, issue price and dividend amount.");
+      else {
+        var calculated = shares * price, tolerance = Math.max(1e-8, Math.abs(amount) * 1e-10);
+        if (Math.abs(calculated - amount) > tolerance) errors.push("DRP link " + linkId + " purchase cost must equal its reinvested dividend.");
+      }
+    });
+    return errors;
+  }
+  function taxSettingsValidationErrors(t, label) {
+    label = label || "Tax settings";
+    var errors = [];
+    function checkNumber(key, description, min, max, integer) {
+      var value = decimalNumber(t && t[key]);
+      if (value == null) { errors.push(label + " " + description + " must be a valid finite number."); return null; }
+      if (min != null && value < min) errors.push(label + " " + description + " cannot be below " + min + ".");
+      if (max != null && value > max) errors.push(label + " " + description + " cannot exceed " + max + ".");
+      if (integer && !Number.isInteger(value)) errors.push(label + " " + description + " must be a whole number.");
+      return value;
+    }
+    if (!t || typeof t !== "object") return [label + " is missing."];
+    var threshold = checkNumber("taxFreeThreshold", "tax-free threshold", 0, null, false);
+    [
+      ["employmentIncome", "employment income"], ["employmentTaxPaid", "tax already paid"],
+      ["otherIncome", "other income"], ["deductions", "deductions"],
+      ["capitalLossCarryIn", "capital losses carried in"],
+    ].forEach(function (item) { checkNumber(item[0], item[1], 0, null, false); });
+    checkNumber("levyRate", "levy rate", 0, 1, false);
+    checkNumber("capitalGainsRate", "capital gains rate", 0, 1, false);
+    checkNumber("capitalGainsDiscount", "capital gains discount", 0, 1, false);
+    checkNumber("capitalGainsDiscountMonths", "discount holding period", 0, null, true);
+    if (!Array.isArray(t.brackets) || !t.brackets.length) errors.push(label + " has no tax brackets.");
+    else {
+      var previousCap = threshold == null ? 0 : threshold, topCount = 0;
+      t.brackets.forEach(function (b, i) {
+        var rate = decimalNumber(b && b.rate);
+        if (rate == null || rate < 0 || rate > 1) errors.push(label + " tax bracket " + (i + 1) + " rate must be between 0% and 100%.");
+        if (b && b.upTo == null) {
+          topCount++;
+          if (i !== t.brackets.length - 1) errors.push(label + " must place its open-ended tax bracket last.");
+          return;
+        }
+        var cap = decimalNumber(b && b.upTo);
+        if (cap == null) errors.push(label + " tax bracket " + (i + 1) + " cap must be a valid finite number.");
+        else if (!(cap > previousCap)) errors.push(label + " tax bracket " + (i + 1) + " cap must be greater than the preceding cap and tax-free threshold.");
+        else previousCap = cap;
+      });
+      if (topCount !== 1) errors.push(label + " needs exactly one open-ended top bracket.");
+    }
+    (Array.isArray(t.adjustments) ? t.adjustments : []).forEach(function (adjustment, i) {
+      var value = decimalNumber(adjustment && adjustment.value);
+      if (value == null || value < 0) errors.push(label + " adjustment " + (i + 1) + " value must be zero or higher.");
+    });
+    return errors;
+  }
+  function applyTaxSettingsCandidate(target, candidate) {
+    var errors = taxSettingsValidationErrors(candidate, "Tax settings");
+    if (errors.length) return { ok: false, errors: errors };
+    var next = JSON.parse(JSON.stringify(candidate));
+    // Invoice fxRate values target the tax currency. A manual Tax Settings currency change must retarget
+    // those locks before copying the candidate into the live record; deleting them would make old invoices
+    // fall back to today's FX and silently rewrite freelance income.
+    if (next.currency !== target.currency) retargetInvoiceFxRates(next, target.currency, next.currency);
+    Object.keys(next).forEach(function (key) { target[key] = next[key]; });
+    if (!Object.prototype.hasOwnProperty.call(next, "presetVersion")) delete target.presetVersion;
+    return { ok: true, errors: [] };
+  }
   function validateDb(d, opts) {
     opts = opts || {};
     var errors = [], warnings = [], repairs = 0, referencedCurrencies = {};
@@ -479,13 +596,18 @@
       x[field] = c; if (c) referencedCurrencies[c] = label;
     }
     function cleanMonth(x, field, label) {
-      if (!validMonthString(x[field])) { x[field] = currentMonth(); repairs++; warn(label + " had an invalid month; current month was used."); }
+      if (validMonthString(x[field])) return;
+      if (opts.strict || !repair) { err(label + " has an invalid month."); return; }
+      x[field] = currentMonth(); repairs++; warn(label + " had an invalid month; current month was used.");
     }
     function cleanDate(x, field, label) {
-      if (!validDateString(x[field])) { x[field] = currentMonth() + "-15"; repairs++; warn(label + " had an invalid date; the middle of the current month was used."); }
+      if (validDateString(x[field])) return;
+      if (opts.strict || !repair) { err(label + " has an invalid date."); return; }
+      x[field] = currentMonth() + "-15"; repairs++; warn(label + " had an invalid date; the middle of the current month was used.");
     }
     function positive(v, label, allowZero) {
-      var n = finiteNumber(v);
+      var n = decimalNumber(v);
+      if (n == null) { err(label + " must be a valid finite number."); return 0; }
       if (allowZero ? n < 0 : n <= 0) err(label + " must be " + (allowZero ? "zero or higher" : "greater than zero") + ".");
       return n;
     }
@@ -496,6 +618,39 @@
     cleanIdList(d.accounts, "Account"); cleanIdList(d.holdings, "Holding"); cleanIdList(d.physicalAssets, "Asset"); cleanIdList(d.expenses, "Expense"); cleanIdList(d.incomes, "Income"); cleanIdList(d.goals, "Goal"); cleanIdList(d.recurring, "Recurring"); cleanIdList(d.debts, "Debt");
     var seenCurrencies = {};
     d.currencies.forEach(function (c, i) { if (!c || typeof c !== "object") return; c.code = String(c.code || "").trim().toUpperCase(); c.rate = finiteNumber(c.rate); if (!c.code) err("Currency row " + (i + 1) + " has no code."); if (c.code && seenCurrencies[c.code]) err("Currency " + c.code + " is duplicated."); seenCurrencies[c.code] = 1; if (!(c.rate > 0)) err("Currency " + (c.code || i + 1) + " has an invalid FX rate."); });
+    d.accounts.forEach(function (a, i) {
+      cleanCurrency(a, "currency", "Account row " + (i + 1));
+      positive(a.balance, "Account row " + (i + 1) + " balance", true);
+      if (a.share != null) {
+        var share = decimalNumber(a.share);
+        if (share == null || share < 0 || share > 100) err("Account row " + (i + 1) + " share must be between 0% and 100%.");
+      }
+    });
+    d.physicalAssets.forEach(function (a, i) {
+      cleanCurrency(a, "currency", "Asset row " + (i + 1));
+      positive(a.value, "Asset row " + (i + 1) + " value", true);
+    });
+    d.goals.forEach(function (g, i) {
+      cleanCurrency(g, "currency", "Goal row " + (i + 1));
+      positive(g.cost, "Goal row " + (i + 1) + " target cost", false);
+      positive(g.currentSavings == null ? 0 : g.currentSavings, "Goal row " + (i + 1) + " saved amount", true);
+    });
+    d.recurring.forEach(function (r, i) {
+      cleanCurrency(r, "currency", "Recurring row " + (i + 1));
+      positive(r.amount, "Recurring row " + (i + 1) + " amount", false);
+      if (r.kind !== "income" && r.kind !== "expense") err("Recurring row " + (i + 1) + " kind must be income or expense.");
+      if (!validMonthString(r.since)) err("Recurring row " + (i + 1) + " has an invalid start month.");
+      if (r.share != null) {
+        var recurringShare = decimalNumber(r.share);
+        if (recurringShare == null || recurringShare < 0 || recurringShare > 100) err("Recurring row " + (i + 1) + " share must be between 0% and 100%.");
+      }
+    });
+    d.debts.forEach(function (debt, i) {
+      cleanCurrency(debt, "currency", "Debt row " + (i + 1));
+      positive(debt.balance, "Debt row " + (i + 1) + " balance", true);
+      positive(debt.apr == null || debt.apr === "" ? 0 : debt.apr, "Debt row " + (i + 1) + " APR", true);
+      positive(debt.payment == null || debt.payment === "" ? 0 : debt.payment, "Debt row " + (i + 1) + " payment", true);
+    });
     [d.expenses, d.incomes].forEach(function (list, li) {
       var label = li === 0 ? "Expense" : "Income";
       list.forEach(function (x, i) { cleanMonth(x, "month", label + " row " + (i + 1)); cleanCurrency(x, "currency", label + " row " + (i + 1)); x.amount = positive(x.amount, label + " row " + (i + 1) + " amount", false); if (x.share != null) x.share = Math.max(0, Math.min(100, finiteNumber(x.share))); });
@@ -503,26 +658,46 @@
     d.holdings.forEach(function (h, hi) {
       var label = h.name || h.ticker || ("Holding " + (hi + 1));
       cleanCurrency(h, "currency", label);
-      h.price = finiteNumber(h.price);
-      if (h.price < 0) err(label + " has a negative current price.");
+      var currentPrice = decimalNumber(h.price == null || h.price === "" ? 0 : h.price);
+      if (currentPrice == null) err(label + " current price must be a valid finite number.");
+      else { h.price = currentPrice; if (currentPrice < 0) err(label + " has a negative current price."); }
       if (!Array.isArray(h.transactions)) { h.transactions = []; repairs++; warn(label + " had no transaction list; an empty ledger was created."); }
       cleanIdList(h.transactions, label + " transaction");
-      var shares = 0;
+      if (!Array.isArray(h.dividends)) { h.dividends = []; repairs++; warn(label + " had no dividend list; an empty list was created."); }
+      cleanIdList(h.dividends, label + " dividend");
+      var shares = "0", ledgerCanReplay = true;
       sortTransactions(h.transactions).forEach(function (t, ti) {
         cleanMonth(t, "month", label + " transaction " + (ti + 1));
         if (t.date != null && !validDateString(t.date)) err(label + " transaction " + (ti + 1) + " has an invalid calendar date.");
         if (validDateString(t.date) && t.date.slice(0, 7) !== t.month) err(label + " transaction " + (ti + 1) + " date and month disagree.");
+        if (validDateString(t.date) && t.date > localDateString()) err(label + " transaction " + (ti + 1) + " is dated in the future.");
         if (!(finiteNumber(t.sequence) > 0)) { t.sequence = (ti + 1) * 10; repairs++; warn(label + " transaction " + (ti + 1) + " had no replay sequence; one was assigned."); }
-        t.type = t.type === "sell" ? "sell" : "buy";
+        var transactionType = t.type;
+        if (transactionType !== "buy" && transactionType !== "sell") {
+          err(label + " transaction " + (ti + 1) + " type must be buy or sell."); ledgerCanReplay = false;
+          if (repair && !opts.strict) { t.type = "buy"; repairs++; warn(label + " transaction " + (ti + 1) + " had an invalid type; buy was used."); }
+        }
         var shareAmount = positive(t.shares, label + " transaction " + (ti + 1) + " shares", false);
         positive(t.price, label + " transaction " + (ti + 1) + " price", false);
+        if (!(shareAmount > 0)) ledgerCanReplay = false;
+        var feeAmount = (t.fees == null || t.fees === "") ? 0 : decimalNumber(t.fees);
+        if (feeAmount == null) err(label + " transaction " + (ti + 1) + " fees must be a valid finite number.");
+        else if (feeAmount < 0) err(label + " transaction " + (ti + 1) + " has negative fees.");
         t.shares = normalizedDecimal(t.shares); t.price = normalizedDecimal(t.price); t.fees = normalizedDecimal(t.fees);
-        if (t.fees < 0) err(label + " transaction " + (ti + 1) + " has negative fees.");
-        if (t.type === "sell") { shares -= shareAmount; if (shares < -1e-6) err(label + " sells more shares than were held by " + t.month + "."); }
-        else shares += shareAmount;
+        if (ledgerCanReplay && (transactionType === "buy" || transactionType === "sell")) {
+          shares = decimalAdd(shares, t.shares, transactionType === "sell");
+          if (shares.charAt(0) === "-") { err(label + " sells more shares than were held by " + t.month + "."); ledgerCanReplay = false; }
+        }
       });
-      (h.dividends || []).forEach(function (dv, di) { cleanMonth(dv, "month", label + " dividend " + (di + 1)); dv.amount = positive(dv.amount, label + " dividend " + (di + 1) + " amount", false); });
+      (h.dividends || []).forEach(function (dv, di) {
+        cleanMonth(dv, "month", label + " dividend " + (di + 1));
+        if (dv.date != null && !validDateString(dv.date)) err(label + " dividend " + (di + 1) + " has an invalid calendar date.");
+        if (validDateString(dv.date) && dv.date.slice(0, 7) !== dv.month) err(label + " dividend " + (di + 1) + " date and month disagree.");
+        var dividendAmount = positive(dv.amount, label + " dividend " + (di + 1) + " amount", false);
+        dv.amount = dv.origin === "drp" ? normalizedDecimal(dv.amount) : dividendAmount;
+      });
     });
+    drpPairValidationErrors(d).forEach(err);
     function validateTaxRecord(t, label) {
       if (!t || typeof t !== "object") return;
       if (!Array.isArray(t.invoices)) t.invoices = [];
@@ -530,25 +705,13 @@
       t.invoices.forEach(function (iv, i) {
         cleanDate(iv, "date", label + " invoice " + (i + 1)); cleanCurrency(iv, "currency", label + " invoice " + (i + 1));
         iv.amount = positive(iv.amount, label + " invoice " + (i + 1) + " amount", false);
-        if (iv.fxRate != null && !(finiteNumber(iv.fxRate) > 0)) err(label + " invoice " + (i + 1) + " has an invalid locked FX rate.");
+        if (iv.fxRate != null && !(decimalNumber(iv.fxRate) > 0)) err(label + " invoice " + (i + 1) + " has an invalid locked FX rate.");
         if (validDateString(iv.date) && !dateInTaxYear(iv.date, t)) {
           iv.legacyYearMismatch = true;
           (opts.strict ? err : warn)(label + " invoice " + (i + 1) + " is dated outside " + (t.year || "its tax year") + ".");
         }
       });
-      if (!Array.isArray(t.brackets)) t.brackets = [];
-      if (!t.brackets.length) err(label + " has no tax brackets.");
-      var previousCap = finiteNumber(t.taxFreeThreshold), sawTop = false;
-      t.brackets.forEach(function (b, i) {
-        var rate = finiteNumber(b.rate);
-        if (rate < 0 || rate > 1) err(label + " tax bracket " + (i + 1) + " rate must be between 0% and 100%.");
-        if (b.upTo == null) { if (sawTop || i !== t.brackets.length - 1) err(label + " must have one open-ended top bracket, placed last."); sawTop = true; return; }
-        var cap = finiteNumber(b.upTo);
-        if (!(cap > previousCap)) err(label + " tax bracket " + (i + 1) + " cap must be greater than the preceding cap and tax-free threshold.");
-        previousCap = cap;
-      });
-      if (t.brackets.length && !sawTop) err(label + " needs an open-ended top bracket.");
-      ["employmentIncome", "employmentTaxPaid", "otherIncome", "deductions", "capitalLossCarryIn"].forEach(function (k) { t[k] = finiteNumber(t[k]); if (t[k] < 0) err(label + " " + k + " is negative."); });
+      taxSettingsValidationErrors(t, label).forEach(err);
       cleanCurrency(t, "currency", label);
     }
     validateTaxRecord(d.tax, "Active tax year");
@@ -576,6 +739,18 @@
   }
   function val(id) { var e = document.getElementById(id); return e ? e.value : ""; }
   function checked(id) { var e = document.getElementById(id); return e ? e.checked : false; }
+  function validatedInputNumber(id, label, opts) {
+    opts = opts || {};
+    var raw = String(val(id) == null ? "" : val(id)).trim();
+    if (raw === "" && opts.blankIsZero) raw = "0";
+    var value = decimalNumber(raw);
+    if (value == null) { toast("Enter a valid " + label); return { ok: false, value: 0 }; }
+    if (opts.min != null && value < opts.min) { toast(label + " cannot be below " + opts.min); return { ok: false, value: value }; }
+    if (opts.max != null && value > opts.max) { toast(label + " cannot exceed " + opts.max); return { ok: false, value: value }; }
+    if (opts.positive && !(value > 0)) { toast("Enter " + label + " greater than zero"); return { ok: false, value: value }; }
+    if (opts.integer && !Number.isInteger(value)) { toast(label + " must be a whole number"); return { ok: false, value: value }; }
+    return { ok: true, value: value };
+  }
 
   // ----------------------------------------------------------
   // Material Symbols Rounded (Google) - the active icon set.
@@ -636,6 +811,11 @@
     var c = curByCode(ccy); return c ? (num(c.rate) || 1) : 1;
   }
   function toBaseAtMonth(amount, ccy, month) { return num(amount) * rateForMonth(ccy, month); }
+  function convertAtMonth(amount, from, to, month) {
+    if (!to || to === base()) return toBaseAtMonth(amount, from, month);
+    var targetRate = rateForMonth(to, month);
+    return targetRate ? toBaseAtMonth(amount, from, month) / targetRate : toBaseAtMonth(amount, from, month);
+  }
 
   // ----------------------------------------------------------
   // Country tax presets (baseline brackets; user can fine-tune later)
@@ -707,7 +887,7 @@
   // ordered list for the dropdown
   var COUNTRY_ORDER = ["AU", "US", "GB", "CA", "DE", "FR", "IT", "ES", "NL", "IE", "NZ", "SG", "JP", "CH", "ZA"];
   // Statutory income-tax presets, verified against PwC Worldwide Tax Summaries + official sources for the
-  // most recent published year (AU 2024/25, US 2025, GB 2025/26, CA 2026, DE 2025, FR 2025, IT 2025,
+  // most recent published year (AU 2026/27, US 2025, GB 2025/26, CA 2026, DE 2025, FR 2025, IT 2025,
   // ES 2025, NL 2026, IE 2025/26, NZ from 31 Jul 2024, SG YA2025, JP 2025, CH federal 2026, ZA 2026/27).
   // `taxFreeThreshold` is the 0% band; `brackets[i].upTo` are absolute total-income bounds (progressiveTax
   // taxes income ABOVE the threshold). For systems whose allowance is a deduction or a credit rather than a
@@ -717,7 +897,7 @@
   // continuous formula. Approximations for guidance only; users can fine-tune in Tax Settings.
   var TAX_PRESETS = {
     AU: { name: "Australia", currency: "AUD", taxFreeThreshold: 18200, levyLabel: "Medicare Levy", levyRate: 0.02, capitalGainsRate: 0.20,
-      brackets: [{ upTo: 45000, rate: 0.16 }, { upTo: 135000, rate: 0.30 }, { upTo: 190000, rate: 0.37 }, { upTo: null, rate: 0.45 }] },
+      brackets: [{ upTo: 45000, rate: 0.15 }, { upTo: 135000, rate: 0.30 }, { upTo: 190000, rate: 0.37 }, { upTo: null, rate: 0.45 }] },
     // US: brackets are the 2025 single-filer bands shifted up by the $15,000 standard deduction so they apply
     // to TOTAL income (taxable income = total − deduction). e.g. 10% on the first $11,925 of taxable income
     // → $15,000-$26,925 of total income.
@@ -762,6 +942,70 @@
     TAX_PRESETS[c].cgtDiscount = CGT_DISCOUNT[c] || 0;
     TAX_PRESETS[c].cgtDiscountMonths = CGT_DISCOUNT_MONTHS[c] || 0;
   });
+  // AU rates are legislated by income year. Keep the planning preset
+  // year-aware so an automatic rollover cannot carry an obsolete first band
+  // into a new financial year. Other countries continue to use their current
+  // documented preset until a dated table is added for them.
+  function taxPresetForYear(code, year) {
+    var source = TAX_PRESETS[code]; if (!source) return null;
+    var p = JSON.parse(JSON.stringify(source));
+    if (code === "AU") {
+      var start = parseInt(String(year || "").slice(0, 4), 10);
+      p.brackets[0].rate = start >= 2027 ? 0.14 : (start >= 2026 ? 0.15 : 0.16);
+    }
+    return p;
+  }
+  function taxRateFieldsMatch(t, p) {
+    if (!t || !p || num(t.taxFreeThreshold) !== num(p.taxFreeThreshold) ||
+      num(t.levyRate) !== num(p.levyRate) || String(t.levyLabel || "") !== String(p.levyLabel || "") ||
+      num(t.capitalGainsRate) !== num(p.capitalGainsRate) ||
+      num(t.capitalGainsDiscount) !== num(p.cgtDiscount) ||
+      num(t.capitalGainsDiscountMonths) !== num(p.cgtDiscountMonths)) return false;
+    var a = t.brackets || [], b = p.brackets || [];
+    if (a.length !== b.length) return false;
+    return a.every(function (row, i) {
+      var au = row.upTo == null ? null : num(row.upTo), bu = b[i].upTo == null ? null : num(b[i].upTo);
+      return au === bu && num(row.rate) === num(b[i].rate);
+    });
+  }
+  function applyPresetRatesToRecord(t, p, code, year) {
+    t.taxFreeThreshold = p.taxFreeThreshold;
+    t.brackets = JSON.parse(JSON.stringify(p.brackets));
+    t.levyRate = p.levyRate;
+    t.levyLabel = p.levyLabel;
+    t.capitalGainsRate = p.capitalGainsRate;
+    t.capitalGainsDiscount = num(p.cgtDiscount);
+    t.capitalGainsDiscountMonths = num(p.cgtDiscountMonths);
+    t.presetManaged = true;
+    t.presetVersion = code + "-" + String(year || "current");
+  }
+  function markTaxPresetManagement(t) {
+    if (!t) return false;
+    var code = t.country || (db.settings && db.settings.country) || "AU";
+    var preset = taxPresetForYear(code, t.year);
+    var managed = !!preset && taxRateFieldsMatch(t, preset);
+    t.presetManaged = managed;
+    if (managed) t.presetVersion = code + "-" + String(t.year || "current");
+    else delete t.presetVersion;
+    return managed;
+  }
+  function upgradeManagedActiveTaxPreset(wallet) {
+    var t = wallet && wallet.tax; if (!t) return;
+    var code = t.country || (wallet.settings && wallet.settings.country) || "AU";
+    var target = taxPresetForYear(code, t.year); if (!target) return;
+    var managed = t.presetManaged === true;
+    if (t.presetManaged == null) {
+      var candidates = [target, TAX_PRESETS[code]];
+      if (code === "AU") {
+        [0.16, 0.15, 0.14].forEach(function (rate) {
+          var legacy = taxPresetForYear("AU", t.year); legacy.brackets[0].rate = rate; candidates.push(legacy);
+        });
+      }
+      managed = candidates.some(function (p) { return taxRateFieldsMatch(t, p); });
+    }
+    if (managed) applyPresetRatesToRecord(t, target, code, t.year);
+    else t.presetManaged = false;
+  }
   function countryName(code) { return (TAX_PRESETS[code] || {}).name || ""; }
   function countryFlag(code) { return String(code || "").toUpperCase() || "Global"; }
   function countryOptions(selected) {
@@ -812,7 +1056,7 @@
     var cm = currentMonth();
     (db.snapshots || []).forEach(function (s) {
       if (s.month === cm) return;   // live month rebuilds from live data at the new base - don't touch
-      ["netWorth", "gross", "invest", "cost", "unrealized", "realized", "income", "expenses",
+      ["netWorth", "gross", "invest", "cost", "contributionCost", "unrealized", "realized", "income", "expenses",
         "debtsTotal", "unmatchedBase", "physAssets"].forEach(function (k) {
         if (typeof s[k] === "number") s[k] = s[k] / oldRate;
       });
@@ -855,24 +1099,37 @@
   // keepBase=true loads only the tax brackets/levy/CGT and leaves the user's chosen
   // base currency untouched (used in the setup wizard, where Base Currency is manual).
   function applyTaxPreset(code, keepBase) {
-    var p = TAX_PRESETS[code]; if (!p) return;
+    var p = taxPresetForYear(code, db.tax && db.tax.year); if (!p) return;
     db.settings.country = code;
     var t = db.tax;
+    var oldTaxCurrency = t.currency;
+    var nextTaxCurrency = keepBase ? db.settings.baseCurrency : p.currency;
+    if (oldTaxCurrency && nextTaxCurrency && oldTaxCurrency !== nextTaxCurrency) {
+      // An invoice's fxRate targets the tax currency that was active when it was locked. Retarget that
+      // dated conversion before rebasing the pool so a country switch cannot reinterpret (or discard) it.
+      retargetInvoiceFxRates(t, oldTaxCurrency, nextTaxCurrency);
+    }
     t.country = code;   // this record's FY window follows the chosen country (archived years keep theirs)
     if (keepBase) {
-      t.currency = db.settings.baseCurrency;          // tax figures stay in the user's base currency
+      t.currency = nextTaxCurrency;                   // tax figures stay in the user's base currency
     } else {
       rebaseCurrencyPool(p.currency);                 // align base reporting currency with the country, rates re-anchored
-      t.currency = p.currency;
+      t.currency = nextTaxCurrency;
     }
-    t.taxFreeThreshold = p.taxFreeThreshold;
-    t.brackets = JSON.parse(JSON.stringify(p.brackets));
-    t.levyRate = p.levyRate;
-    t.levyLabel = p.levyLabel;
-    t.capitalGainsRate = p.capitalGainsRate;
-    t.capitalGainsDiscount = num(p.cgtDiscount);   // fraction of realized gains excluded from taxable income
-    t.capitalGainsDiscountMonths = num(p.cgtDiscountMonths);   // min holding period (months) for that discount
+    applyPresetRatesToRecord(t, p, code, t.year);
     pruneCurrencies();   // only the base (+ secondary + in-use) stays in the pool
+  }
+  // A country switch changes the active fiscal window as well as its rates. Plan the target label first so
+  // taxPresetForYear reads the new year, and reject an archive collision rather than leaving the active
+  // record with a country/window that disagrees with its label.
+  function switchTaxCountryPreset(code, keepBase, today) {
+    var nextLabel = expectedFYLabel(today || new Date(), code);
+    var collides = (db.taxArchive || []).some(function (a) { return a && a.year === nextLabel; });
+    if (collides) return { ok: false, reason: "archive_collision", year: nextLabel };
+    if (db.tax) db.tax.year = nextLabel;
+    applyTaxPreset(code, keepBase);
+    if (db.tax) state.taxYear = db.tax.year;
+    return { ok: true, year: nextLabel };
   }
   // Legal note shown under the country preset (wizard) and inside Tax Settings.
   var TAX_DISCLAIMER = '<p class="hint" style="font-style:italic;margin:8px 0 0">Tax laws and brackets can change and may differ from recent updates within that country.</p>';
@@ -937,6 +1194,10 @@
   // ----------------------------------------------------------
   // Computations
   // ----------------------------------------------------------
+  // Calculations are frequently requested several times while composing one page (cards, table rows,
+  // totals and charts). Cache only for that synchronous render call; render() always discards the maps in
+  // finally, so in-place transaction/price/currency mutations in action handlers can never reuse stale data.
+  var renderCalcCache = null;
   function typeColor(key) { return TYPE_COLOR[key] || null; }
   function typeMeta(key) {
     var t = (db.holdingTypes || []).filter(function (x) { return x.key === key; })[0];
@@ -950,7 +1211,7 @@
   }
 
   function sortTransactions(list) {
-    return (list || []).slice().sort(function (a, b) {
+    var compare = function (a, b) {
       var am = String(a.month || ""), bm = String(b.month || "");
       if (am !== bm) return am < bm ? -1 : 1;
       var ad = a.date && validDateString(a.date) ? a.date : "", bd = b.date && validDateString(b.date) ? b.date : "";
@@ -958,18 +1219,34 @@
       var as = finiteNumber(a.sequence), bs = finiteNumber(b.sequence);
       if (as !== bs) return as - bs;
       return 0;   // modern Array.sort is stable, preserving imported row order when legacy fields tie
-    });
+    };
+    var out = (list || []).slice(), ordered = true;
+    // Ledgers created by Valutio are already canonical. Avoid an O(n log n)
+    // sort on every calculation while retaining deterministic repair for
+    // imported or legacy arrays that arrive out of order.
+    for (var i = 1; i < out.length; i++) {
+      if (compare(out[i - 1], out[i]) > 0) { ordered = false; break; }
+    }
+    return ordered ? out : out.sort(compare);
   }
-  function sortedTxns(h) { return sortTransactions((h && h.transactions) || []); }
+  function sortedTxns(h) {
+    if (renderCalcCache && h && renderCalcCache.sorted.has(h)) return renderCalcCache.sorted.get(h);
+    var result = sortTransactions((h && h.transactions) || []);
+    if (renderCalcCache && h) renderCalcCache.sorted.set(h, result);
+    return result;
+  }
   function nextTransactionSequence(h) {
     return (h && h.transactions || []).reduce(function (n, t) { return Math.max(n, finiteNumber(t.sequence)); }, 0) + 10;
   }
   function decimalParts(v) {
     var s = String(v == null ? "0" : v).trim();
-    if (/e/i.test(s)) s = num(s).toFixed(20).replace(/0+$/, "").replace(/\.$/, "");
-    var neg = s.charAt(0) === "-"; if (neg || s.charAt(0) === "+") s = s.slice(1);
-    var p = s.split("."), frac = p[1] || "", digits = (p[0] || "0") + frac;
-    return { n: BigInt((neg ? "-" : "") + (digits.replace(/^0+(?=\d)/, "") || "0")), scale: frac.length };
+    var match = /^([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(s);
+    if (!match || !(match[2] || match[3])) throw new Error("Invalid decimal value");
+    var frac = match[3] || "", exponent = parseInt(match[4] || "0", 10);
+    var digits = ((match[2] || "0") + frac).replace(/^0+(?=\d)/, "") || "0";
+    var scale = frac.length - exponent;
+    if (scale < 0) { digits += "0".repeat(-scale); scale = 0; }
+    return { n: BigInt((match[1] === "-" ? "-" : "") + digits), scale: scale };
   }
   function decimalAdd(a, b, subtract) {
     var x = decimalParts(a), y = decimalParts(b), scale = Math.max(x.scale, y.scale);
@@ -1005,42 +1282,54 @@
   // Walk the buy/sell ledger with weighted-average cost. Returns per-transaction rows
   // with running shares/cost and (for sells) realized P/L.
   function holdingLedger(h) {
-    var shares = 0, costBasis = 0;
-    return sortedTxns(h).map(function (t) {
+    if (renderCalcCache && h && renderCalcCache.ledgers.has(h)) return renderCalcCache.ledgers.get(h);
+    var shares = 0, costBasis = 0, contributionCost = 0;
+    var result = sortedTxns(h).map(function (t) {
       var sh = num(t.shares), row = { t: t };
       if (t.type === "sell") {
         var soldSh = Math.min(sh, shares > 0 ? shares : 0);   // can't sell more than held: clamp so realized never books phantom shares
         var avg = shares > 0 ? costBasis / shares : 0;
+        var contributionAvg = shares > 0 ? contributionCost / shares : 0;
         var costOut = avg * soldSh;
         var proceeds = soldSh * num(t.price) - num(t.fees);
         row.gross = soldSh * num(t.price);  // sold value (gross)
         row.realized = proceeds - costOut;  // realized P/L for this sale (on the clamped, actually-held quantity)
-        shares -= soldSh; costBasis -= costOut;
-        if (shares < 1e-9) { shares = 0; costBasis = 0; }
+        shares -= soldSh; costBasis -= costOut; contributionCost -= contributionAvg * soldSh;
+        if (shares < 1e-9) { shares = 0; costBasis = 0; contributionCost = 0; }
       } else {
         var c = sh * num(t.price) + num(t.fees);
         row.cost = c;                       // cost of this purchase
         row.realized = null;
         shares += sh; costBasis += c;
+        if (t.origin !== "drp") contributionCost += c;
       }
       row.sharesAfter = shares;
       row.costAfter = costBasis;
+      row.contributionCostAfter = contributionCost;
       return row;
     });
+    if (renderCalcCache && h) renderCalcCache.ledgers.set(h, result);
+    return result;
   }
   // Cost basis & shares of a holding as of the end of a given month (weighted-average cost).
   function costBasisUpTo(h, month) {
-    var shares = 0, cost = 0;
+    var shares = 0, cost = 0, contributionCost = 0;
     sortedTxns(h).forEach(function (t) {
       if (t.month > month) return;
       var sh = num(t.shares);
       if (t.type === "sell") {
         var avg = shares > 0 ? cost / shares : 0;
-        cost -= avg * sh; shares -= sh;
-        if (shares < 1e-9) { shares = 0; cost = 0; }
-      } else { cost += sh * num(t.price) + num(t.fees); shares += sh; }
+        var contributionAvg = shares > 0 ? contributionCost / shares : 0;
+        var soldSh = Math.min(sh, shares > 0 ? shares : 0);
+        cost -= avg * soldSh; contributionCost -= contributionAvg * soldSh; shares -= soldSh;
+        if (shares < 1e-9) { shares = 0; cost = 0; contributionCost = 0; }
+      } else {
+        var c = sh * num(t.price) + num(t.fees);
+        cost += c; shares += sh;
+        if (t.origin !== "drp") contributionCost += c;
+      }
     });
-    return { cost: cost, shares: shares };
+    return { cost: cost, contributionCost: contributionCost, shares: shares };
   }
   // Per-holding value/cost time series (base currency): cost from the ledger, value from snapshots + now.
   function holdingHistory(h) {
@@ -1059,21 +1348,24 @@
   }
   // Current aggregate metrics for a holding, all derived from its transactions.
   function holdingMetrics(h) {
+    if (renderCalcCache && h && renderCalcCache.metrics.has(h)) return renderCalcCache.metrics.get(h);
     var price = num(h.price);
-    var shares = 0, costBasis = 0, realized = num(h.realizedSeed || 0);
+    var shares = 0, costBasis = 0, contributionCost = 0, realized = num(h.realizedSeed || 0);
     var buyCostTotal = 0;
     sortedTxns(h).forEach(function (t) {
       var sh = num(t.shares);
       if (t.type === "sell") {
         var soldSh = Math.min(sh, shares > 0 ? shares : 0);   // clamp: never realize P/L on more than was held
         var avg = shares > 0 ? costBasis / shares : 0;
+        var contributionAvg = shares > 0 ? contributionCost / shares : 0;
         var costOut = avg * soldSh;
         realized += (soldSh * num(t.price) - num(t.fees)) - costOut;
-        shares -= soldSh; costBasis -= costOut;
-        if (shares < 1e-9) { shares = 0; costBasis = 0; }
+        shares -= soldSh; costBasis -= costOut; contributionCost -= contributionAvg * soldSh;
+        if (shares < 1e-9) { shares = 0; costBasis = 0; contributionCost = 0; }
       } else {
         var c = sh * num(t.price) + num(t.fees);
         shares += sh; costBasis += c;
+        if (t.origin !== "drp") contributionCost += c;
         buyCostTotal += c;
       }
     });
@@ -1081,33 +1373,39 @@
     var marketValue = shares * price;
     var unrealized = marketValue - costBasis;
     var totalReturn = unrealized + realized;
-    return {
+    var result = {
       price: price, shares: shares, avgBuyPrice: avgBuyPrice,
-      cost: costBasis, buyCostTotal: buyCostTotal, marketValue: marketValue,
+      cost: costBasis, contributionCost: contributionCost, buyCostTotal: buyCostTotal, marketValue: marketValue,
       unrealized: unrealized, realized: realized, totalReturn: totalReturn,
       retPct: costBasis > 0 ? unrealized / costBasis : 0,
-      totalReturnPct: buyCostTotal > 0 ? totalReturn / buyCostTotal : 0,
+      // Keep the displayed Return % definition consistent with frozen rows and
+      // portfolio totals: total P/L divided by the remaining cost basis.
+      totalReturnPct: costBasis > 0 ? totalReturn / costBasis : 0,
       marketValueBase: toBase(marketValue, h.currency),
       costBase: toBase(costBasis, h.currency),
+      contributionCostBase: toBase(contributionCost, h.currency),
       unrealizedBase: toBase(unrealized, h.currency),
       realizedBase: toBase(realized, h.currency),
       totalReturnBase: toBase(totalReturn, h.currency),
     };
+    if (renderCalcCache && h) renderCalcCache.metrics.set(h, result);
+    return result;
   }
   // Metrics for a FROZEN per-holding record stored in a snapshot (values + locked FX rate).
   function frozenHoldingMetrics(fr) {
     var shares = num(fr.shares), buyPrice = num(fr.buyPrice), price = num(fr.price);
     var rate = num(fr.rate) || 1;
     var cost = shares * buyPrice + num(fr.fees);
+    var contributionCost = fr.contributionCost == null ? cost : num(fr.contributionCost);
     var mv = shares * price;
     var unreal = mv - cost;
     var realized = num(fr.realized);
     var totalReturn = unreal + realized;
     return {
-      shares: shares, avgBuyPrice: buyPrice, price: price, cost: cost, marketValue: mv,
+      shares: shares, avgBuyPrice: buyPrice, price: price, cost: cost, contributionCost: contributionCost, marketValue: mv,
       unrealized: unreal, realized: realized, totalReturn: totalReturn,
       retPct: cost > 0 ? totalReturn / cost : 0,
-      costBase: cost * rate, marketValueBase: mv * rate, unrealizedBase: unreal * rate, realizedBase: realized * rate,
+      costBase: cost * rate, contributionCostBase: contributionCost * rate, marketValueBase: mv * rate, unrealizedBase: unreal * rate, realizedBase: realized * rate,
       currency: fr.currency,
     };
   }
@@ -1162,7 +1460,7 @@
       var resid = num(s.invest) - trackedMv;
       s.unmatchedBase = resid > 0.005 ? resid : 0;
     }
-    var invest = 0, cost = 0, unreal = 0, real = 0, buckets = {};
+    var invest = 0, cost = 0, contributionCost = 0, unreal = 0, real = 0, buckets = {};
     Object.keys(s.accounts || {}).forEach(function (id) {
       var a = s.accounts[id];
       var frac = effShareFrac(id, a);   // your share (live share re-lenses history; household = 100%)
@@ -1181,7 +1479,7 @@
       }
       var fm = frozenHoldingMetrics(fr);
       fr.mvBase = fm.marketValueBase; fr.costBase = fm.costBase;   // keep legacy fields fresh
-      invest += fm.marketValueBase; cost += fm.costBase; unreal += fm.unrealizedBase; real += fm.realizedBase;
+      invest += fm.marketValueBase; cost += fm.costBase; contributionCost += fm.contributionCostBase; unreal += fm.unrealizedBase; real += fm.realizedBase;
       var k = fr.type === "crypto" ? "Crypto" : "Investments";
       buckets[k] = (buckets[k] || 0) + fm.marketValueBase;
     });
@@ -1193,14 +1491,14 @@
         var cur = curByCode(ccy);
         var r = (!live && s.rates && s.rates[ccy] != null) ? num(s.rates[ccy]) : (cur ? num(cur.rate) : null);
         var v = (r != null) ? num(s.unmatched[ccy]) * r : num(s.unmatched[ccy]);
-        invest += v; cost += v; buckets["Investments"] = (buckets["Investments"] || 0) + v;
+        invest += v; cost += v; contributionCost += v; buckets["Investments"] = (buckets["Investments"] || 0) + v;
       });
     } else if (num(s.unmatchedBase)) {
-      invest += num(s.unmatchedBase); cost += num(s.unmatchedBase);
+      invest += num(s.unmatchedBase); cost += num(s.unmatchedBase); contributionCost += num(s.unmatchedBase);
       buckets["Investments"] = (buckets["Investments"] || 0) + num(s.unmatchedBase);
     }
     if (num(s.physAssets)) buckets["Physical Assets"] = (buckets["Physical Assets"] || 0) + num(s.physAssets); // keep frozen physical assets
-    s.invest = invest; s.cost = cost; s.unrealized = unreal; s.realized = real; s.buckets = buckets;
+    s.invest = invest; s.cost = cost; s.contributionCost = contributionCost; s.unrealized = unreal; s.realized = real; s.buckets = buckets;
     s.gross = Object.keys(buckets).reduce(function (a, k) { return a + buckets[k]; }, 0);
     // LIVE month: re-freeze each debt's base balance at current FX. A frozenEdit (manual past-row edit)
     // keeps the month's already-frozen s.debts/s.debtsTotal untouched. netWorth = gross assets - debts.
@@ -1238,6 +1536,7 @@
         var prev = s.holdings[h.id];
         s.holdings[h.id] = {
           shares: pos.shares, buyPrice: pos.avgBuyPrice, fees: 0,
+          contributionCost: pos.contributionCost,
           price: prev && num(prev.price) > 0 ? num(prev.price) : pos.avgBuyPrice,
           realized: pos.realized, type: h.type, currency: h.currency,
           rate: (curByCode(h.currency) || {}).rate || (prev ? num(prev.rate) : 1) || 1,
@@ -1271,7 +1570,7 @@
   // so the month is permanently locked to those rates. Native amounts are never mutated.
   function applyFrozenRates(s, rates) {
     var rate = function (ccy) { return rates[ccy] != null ? num(rates[ccy]) : ((curByCode(ccy) || {}).rate || 1); };
-    var invest = 0, cost = 0, unreal = 0, real = 0, buckets = {};
+    var invest = 0, cost = 0, contributionCost = 0, unreal = 0, real = 0, buckets = {};
     Object.keys(s.accounts || {}).forEach(function (id) {
       var a = s.accounts[id];
       a.balanceBase = num(a.balance) * rate(a.currency) * shareFrac(a.share);   // owned base at the month's FX
@@ -1282,17 +1581,17 @@
       fr.rate = rate(fr.currency);
       var fm = frozenHoldingMetrics(fr);
       fr.mvBase = fm.marketValueBase; fr.costBase = fm.costBase;
-      invest += fm.marketValueBase; cost += fm.costBase; unreal += fm.unrealizedBase; real += fm.realizedBase;
+      invest += fm.marketValueBase; cost += fm.costBase; contributionCost += fm.contributionCostBase; unreal += fm.unrealizedBase; real += fm.realizedBase;
       var k = fr.type === "crypto" ? "Crypto" : "Investments";
       buckets[k] = (buckets[k] || 0) + fm.marketValueBase;
     });
     if (s.unmatched && typeof s.unmatched === "object") {
       Object.keys(s.unmatched).forEach(function (ccy) {
         var v = num(s.unmatched[ccy]) * rate(ccy);
-        invest += v; cost += v; buckets["Investments"] = (buckets["Investments"] || 0) + v;
+        invest += v; cost += v; contributionCost += v; buckets["Investments"] = (buckets["Investments"] || 0) + v;
       });
     } else if (num(s.unmatchedBase)) {
-      invest += num(s.unmatchedBase); cost += num(s.unmatchedBase);
+      invest += num(s.unmatchedBase); cost += num(s.unmatchedBase); contributionCost += num(s.unmatchedBase);
       buckets["Investments"] = (buckets["Investments"] || 0) + num(s.unmatchedBase);
     }
     if (num(s.physAssets)) buckets["Physical Assets"] = (buckets["Physical Assets"] || 0) + num(s.physAssets);
@@ -1301,7 +1600,7 @@
       .reduce(function (t, x) { return t + num(x.amount) * rate(x.currency) * viewFrac(x); }, 0);
     s.expenses = (db.expenses || []).filter(function (x) { return x.month === s.month; })
       .reduce(function (t, x) { return t + num(x.amount) * rate(x.currency) * viewFrac(x); }, 0);
-    s.invest = invest; s.cost = cost; s.unrealized = unreal; s.realized = real; s.buckets = buckets;
+    s.invest = invest; s.cost = cost; s.contributionCost = contributionCost; s.unrealized = unreal; s.realized = real; s.buckets = buckets;
     s.gross = Object.keys(buckets).reduce(function (a, k) { return a + buckets[k]; }, 0);
     s.netWorth = s.gross - num(s.debtsTotal);   // keep any frozen debts (historical months have none -> 0)
     s.rates = {}; (db.currencies || []).forEach(function (c) { s.rates[c.code] = rate(c.code); });
@@ -1335,7 +1634,7 @@
   }
   function blankSnapshot(m) {
     return {
-      month: m, date: new Date().toISOString(), netWorth: 0, gross: 0, invest: 0, cost: 0,
+      month: m, date: new Date().toISOString(), netWorth: 0, gross: 0, invest: 0, cost: 0, contributionCost: 0,
       unrealized: 0, realized: 0, buckets: {}, holdings: {}, accounts: {},
       income: monthTotal(db.incomes, m), expenses: monthTotal(db.expenses, m),
     };
@@ -1370,10 +1669,10 @@
     });
   }
   function portfolioTotals() {
-    var t = { mv: 0, cost: 0, unreal: 0, real: 0 };
+    var t = { mv: 0, cost: 0, contributionCost: 0, unreal: 0, real: 0 };
     db.holdings.forEach(function (h) {
       var m = holdingMetrics(h);
-      t.mv += m.marketValueBase; t.cost += m.costBase;
+      t.mv += m.marketValueBase; t.cost += m.costBase; t.contributionCost += m.contributionCostBase;
       t.unreal += m.unrealizedBase; t.real += m.realizedBase;
     });
     return t;
@@ -1429,6 +1728,37 @@
     var s = (liveA && liveA.share != null) ? liveA.share : (fr && fr.share);
     return state.netView === "household" ? 1 : shareFrac(s);
   }
+  function frozenAccountFullBase(snap, id, fr) {
+    if (snap && snap.rates && snap.rates[fr.currency] != null) return num(fr.balance) * num(snap.rates[fr.currency]);
+    var closeShare = shareFrac(fr.share);
+    if (fr.balanceBase != null && closeShare > 0) return num(fr.balanceBase) / closeShare;
+    return curByCode(fr.currency) ? toBase(num(fr.balance), fr.currency) : num(fr.balance);
+  }
+  function snapshotAccountShareFrac(id, fr, requestedView) {
+    if ((requestedView || state.netView) === "household") return 1;
+    var liveA = liveAccountFor(id, fr);
+    return shareFrac(liveA && liveA.share != null ? liveA.share : fr.share);
+  }
+  // Project a frozen snapshot through the active ownership lens without mutating its locked records.
+  // Stored aggregates contain the share that applied at close; the delta below replaces only that account
+  // slice with the live ownership percentage (or 100% for Household), leaving prices, FX and debts frozen.
+  function snapshotForView(snap, requestedView) {
+    if (!snap || !snap.accounts || !Object.keys(snap.accounts).length) return snap;
+    var buckets = Object.assign({}, snap.buckets || {}), deltaTotal = 0;
+    Object.keys(snap.accounts).forEach(function (id) {
+      var fr = snap.accounts[id], fullBase = frozenAccountFullBase(snap, id, fr);
+      var storedOwned = fr.balanceBase != null ? num(fr.balanceBase) : fullBase * shareFrac(fr.share);
+      var projected = fullBase * snapshotAccountShareFrac(id, fr, requestedView);
+      var delta = projected - storedOwned, bucket = fr.bucket || "Cash";
+      buckets[bucket] = num(buckets[bucket]) + delta;
+      deltaTotal += delta;
+    });
+    return Object.assign({}, snap, {
+      buckets: buckets,
+      gross: num(snap.gross != null ? snap.gross : snap.netWorth) + deltaTotal,
+      netWorth: num(snap.netWorth) + deltaTotal,
+    });
+  }
   // Shared "My share / Household" pill toggle (accent-filled active, white text - matches the Cash Flow
   // Quick-Add toggle). Shown on a page only when that page has joint items; flips the global state.netView.
   function netViewToggle(show) {
@@ -1479,7 +1809,7 @@
   function snapshotBucketsByCcy(snap) {
     var out = {};
     function add(bucket, ccy, amt) { if (!ccy || !amt) return; if (!out[bucket]) out[bucket] = {}; out[bucket][ccy] = (out[bucket][ccy] || 0) + amt; }
-    Object.keys((snap && snap.accounts) || {}).forEach(function (id) { var a = snap.accounts[id]; add(a.bucket || "Cash", a.currency, num(a.balance) * shareFrac(a.share)); });
+    Object.keys((snap && snap.accounts) || {}).forEach(function (id) { var a = snap.accounts[id]; add(a.bucket || "Cash", a.currency, num(a.balance) * snapshotAccountShareFrac(id, a)); });
     Object.keys((snap && snap.holdings) || {}).forEach(function (id) { var h = snap.holdings[id]; add(h.type === "crypto" ? "Crypto" : "Investments", h.currency, num(h.shares) * num(h.price)); });
     if (snap && num(snap.physAssets)) add("Physical Assets", base(), num(snap.physAssets));
     return out;
@@ -1520,9 +1850,11 @@
   function netWorthAfterDebts() { return grossNetWorth() - debtsTotalBase(); }
   function monthTotal(arr, month) {
     // viewFrac applies the joint "my share" lens (1 for non-joint / household view) - only expenses carry a
-    // share, so income totals (and the tax sums, which read income) are unaffected.
+    // share, so income totals (and the tax sums, which read income) are unaffected. A closed month must
+    // use the FX map frozen into that month's snapshot; otherwise editing a historical cash-flow row after
+    // today's rates move would rewrite History.
     return arr.filter(function (x) { return x.month === month; })
-      .reduce(function (s, x) { return s + toBase(num(x.amount), x.currency) * viewFrac(x); }, 0);
+      .reduce(function (s, x) { return s + toBaseAtMonth(num(x.amount), x.currency, month) * viewFrac(x); }, 0);
   }
 
   function progressiveTax(income, threshold, brackets) {
@@ -1543,6 +1875,44 @@
     if (iv.currency === t.currency) return num(iv.amount);
     if (iv.fxRate) return num(iv.amount) * num(iv.fxRate);
     return convert(num(iv.amount), iv.currency, t.currency);
+  }
+  // Re-target existing invoice locks when the tax currency changes. `fxRate` is native invoice currency
+  // -> tax currency, so composing it with the old-tax -> new-tax cross preserves the locked conversion
+  // instead of deleting it and falling back to whichever live rate happens to be loaded today.
+  function retargetInvoiceFxRates(t, oldTaxCurrency, newTaxCurrency) {
+    if (!t || !oldTaxCurrency || !newTaxCurrency || oldTaxCurrency === newTaxCurrency) return;
+    var rateInBase = function (code) {
+      var c = curByCode(code);
+      if (c && num(c.rate) > 0) return num(c.rate);
+      var mr = num(metaRateInBase(code));
+      return mr > 0 ? mr : 1;
+    };
+    var oldToNew = rateInBase(oldTaxCurrency) / rateInBase(newTaxCurrency);
+    if (!(oldToNew > 0) || !isFinite(oldToNew)) return;
+    var archivedLocks = t.sourceSnapshot && t.sourceSnapshot.invoiceAmounts;
+    (t.invoices || []).forEach(function (iv) {
+      if (!iv) return;
+      if (iv.currency === newTaxCurrency) { delete iv.fxRate; delete iv.fxDate; return; }
+      var oldLock;
+      if (iv.currency === oldTaxCurrency) oldLock = 1;
+      else if (num(iv.fxRate) > 0) oldLock = num(iv.fxRate);
+      else if (archivedLocks && archivedLocks[iv.id] != null && num(iv.amount) > 0) oldLock = num(archivedLocks[iv.id]) / num(iv.amount);
+      else oldLock = rateInBase(iv.currency) / rateInBase(oldTaxCurrency);
+      var nextLock = oldLock * oldToNew;
+      if (nextLock > 0 && isFinite(nextLock)) {
+        iv.fxRate = nextLock;
+        if (!iv.fxDate && validDateString(iv.date)) iv.fxDate = iv.date;
+      }
+    });
+    if (t.sourceSnapshot && t.sourceSnapshot.version === 1) {
+      t.sourceSnapshot.taxCurrency = newTaxCurrency;
+      t.sourceSnapshot.invoiceAmounts = {};
+      (t.invoices || []).forEach(function (iv) {
+        if (validDateString(iv.date) && dateInTaxYear(iv.date, t)) {
+          t.sourceSnapshot.invoiceAmounts[iv.id] = iv.currency === newTaxCurrency ? num(iv.amount) : num(iv.amount) * num(iv.fxRate);
+        }
+      });
+    }
   }
   function invoiceValueForTaxYear(iv, t) {
     t = t || db.tax;
@@ -1573,14 +1943,14 @@
     return brackets.length ? num(brackets[brackets.length - 1].rate) : 0;
   }
   function deriveTaxSources(t) {
-    var split = realizedYearSplit(t.year, num(t.capitalGainsDiscountMonths || 0), t.country);
+    var split = realizedYearSplit(t.year, num(t.capitalGainsDiscountMonths || 0), t.country, t.currency);
     return {
       version: 1,
-      interests: fromBase(interestsInTaxYear(t.year, t === db.tax, t.country), t.currency),
-      dividends: fromBase(dividendsInTaxYear(t.year, t === db.tax, t.country), t.currency),
-      longGains: fromBase(split.longGains, t.currency), longLosses: fromBase(split.longLosses, t.currency),
-      shortGains: fromBase(split.shortGains, t.currency), shortLosses: fromBase(split.shortLosses, t.currency),
-      unknownGains: fromBase(split.unknownGains, t.currency), unknownLosses: fromBase(split.unknownLosses, t.currency),
+      interests: interestsInTaxYear(t.year, t === db.tax, t.country, t.currency),
+      dividends: dividendsInTaxYear(t.year, t === db.tax, t.country, t.currency),
+      longGains: split.longGains, longLosses: split.longLosses,
+      shortGains: split.shortGains, shortLosses: split.shortLosses,
+      unknownGains: split.unknownGains, unknownLosses: split.unknownLosses,
     };
   }
   function captureTaxSources(t, provenance) {
@@ -1592,8 +1962,16 @@
   }
   function syncArchivedInvoiceSnapshot(t) {
     if (!t || t === db.tax || !t.sourceSnapshot || t.sourceSnapshot.version !== 1) return;
-    t.sourceSnapshot.invoiceAmounts = {};
-    (t.invoices || []).forEach(function (iv) { if (validDateString(iv.date) && dateInTaxYear(iv.date, t)) t.sourceSnapshot.invoiceAmounts[iv.id] = invoiceInTax(iv, t); });
+    var previous = t.sourceSnapshot.invoiceAmounts || {}, next = {};
+    (t.invoices || []).forEach(function (iv) {
+      if (!validDateString(iv.date) || !dateInTaxYear(iv.date, t)) return;
+      // Modern invoices carry their own dated rate. For a legacy archive with only the captured converted
+      // amount, keep that exact lock rather than rebuilding it at today's FX while editing another row.
+      if (iv.currency === t.currency || num(iv.fxRate) > 0) next[iv.id] = invoiceInTax(iv, t);
+      else if (previous[iv.id] != null) next[iv.id] = num(previous[iv.id]);
+      else next[iv.id] = invoiceInTax(iv, t);
+    });
+    t.sourceSnapshot.invoiceAmounts = next;
   }
   function taxSourcesFor(t) {
     return t !== db.tax && t.sourceSnapshot && t.sourceSnapshot.version === 1 ? t.sourceSnapshot : deriveTaxSources(t);
@@ -1728,7 +2106,7 @@
     var w = fyWindow(label, code), total = 0;
     (db.holdings || []).forEach(function (h) {
       holdingLedger(h).forEach(function (r) {
-        if (r.realized != null && r.t.month >= w.start && r.t.month <= w.end) total += toBase(r.realized, h.currency);
+        if (r.realized != null && r.t.month >= w.start && r.t.month <= w.end) total += toBaseAtMonth(r.realized, h.currency, r.t.month);
       });
     });
     return total;
@@ -1737,12 +2115,12 @@
   // category names "interest", over the tax-year window. `includeCurrent` also folds in the live current
   // month (the active year), so interest accruing in the open month is taxed even when the Jul-Jun window
   // doesn't span it (e.g. a calendar-year country mid-year).
-  function interestsInTaxYear(label, includeCurrent, code) {
+  function interestsInTaxYear(label, includeCurrent, code, outputCurrency) {
     var w = fyWindow(label, code), cm = currentMonth(), total = 0;
     (db.incomes || []).forEach(function (x) {
       if (!/interest/i.test(String(x.category || ""))) return;
       var inWin = x.month >= w.start && x.month <= w.end;
-      if (inWin || (includeCurrent && x.month === cm)) total += toBase(num(x.amount), x.currency);
+      if (inWin || (includeCurrent && x.month === cm)) total += convertAtMonth(num(x.amount), x.currency, outputCurrency, x.month);
     });
     return total;
   }
@@ -1763,11 +2141,11 @@
   // Cost basis stays weighted-average (matching realizedInTaxYear); holding period is resolved per sale by
   // FIFO-matching the sold shares to the oldest remaining buy lots, then the sale's gain is apportioned by
   // the long/short share ratio. thr=0 makes everything long-term (no holding-period condition).
-  function realizedYearSplit(label, thr, code) {
+  function realizedYearSplit(label, thr, code, outputCurrency) {
     var out = { long: 0, short: 0, unknown: 0, longGains: 0, longLosses: 0, shortGains: 0, shortLosses: 0, unknownGains: 0, unknownLosses: 0 };
     thr = num(thr);
     (db.holdings || []).forEach(function (h) {
-      var rate = (curByCode(h.currency) || {}).rate || 1, lots = [], avgSh = 0, avgCost = 0;
+      var lots = [], avgSh = 0, avgCost = 0;
       sortedTxns(h).forEach(function (t) {
         var sh = num(t.shares), pr = num(t.price), fee = num(t.fees);
         if (t.type === "sell") {
@@ -1784,7 +2162,7 @@
           if (tot > 0 && transactionInTaxYear(t, label, code)) {
             [["long", lng], ["short", srt], ["unknown", unk]].forEach(function (part) {
               if (!(part[1] > 0)) return;
-              var amount = gain * (part[1] / tot) * rate, key = part[0]; out[key] += amount;
+              var amount = convertAtMonth(gain * (part[1] / tot), h.currency, outputCurrency, t.month), key = part[0]; out[key] += amount;
               if (amount >= 0) out[key + "Gains"] += amount; else out[key + "Losses"] += -amount;
             });
           }
@@ -1818,12 +2196,14 @@
     return { long: long, short: short };
   }
   // Dividend income received within a tax year (base currency), summed across every holding's dividend log.
-  function dividendsInTaxYear(label, includeCurrent, code) {
+  function dividendsInTaxYear(label, includeCurrent, code, outputCurrency) {
     var w = fyWindow(label, code), cm = currentMonth(), total = 0;
     (db.holdings || []).forEach(function (h) {
       (h.dividends || []).forEach(function (d) {
-        var inWin = d.month >= w.start && d.month <= w.end;
-        if (inWin || (includeCurrent && d.month === cm)) total += toBase(num(d.amount), h.currency);
+        var exact = validDateString(d.date);
+        var inWin = exact ? dateInTaxYear(d.date, { year: label, country: code }) : (d.month >= w.start && d.month <= w.end);
+        var inCurrent = exact ? d.date.slice(0, 7) === cm : d.month === cm;
+        if (inWin || (includeCurrent && inCurrent)) total += convertAtMonth(num(d.amount), h.currency, outputCurrency, d.month);
       });
     });
     return total;
@@ -1871,7 +2251,7 @@
     var liveAll = 0;
     (db.holdings || []).forEach(function (h) {
       liveAll += toBase(num(h.realizedSeed || 0), h.currency);
-      holdingLedger(h).forEach(function (r) { if (r.realized != null) liveAll += toBase(r.realized, h.currency); });
+      holdingLedger(h).forEach(function (r) { if (r.realized != null) liveAll += toBaseAtMonth(r.realized, h.currency, r.t.month); });
     });
     // Add realized from holdings that existed at the last freeze but have since been deleted - their history
     // survives only in the snapshot (live holdings already counted above, so no double count).
@@ -1886,7 +2266,7 @@
     var total = 0;
     (db.holdings || []).forEach(function (h) {
       holdingLedger(h).forEach(function (r) {
-        if (r.cost != null && r.t.month === month) total += toBase(r.cost, h.currency);
+        if (r.cost != null && r.t.month === month) total += toBaseAtMonth(r.cost, h.currency, month);
       });
     });
     return total;
@@ -1897,13 +2277,17 @@
   // past flows convert at that month's frozen FX where available (toBaseAtMonth), like the rest of the app.
   function holdingFlows(h) {
     var out = [], nowMs = Date.now();
+    var flowMs = function (row) {
+      var exact = validDateString(row && row.date) ? Date.parse(row.date + "T00:00:00Z") : monthMs(row.month);
+      return Math.min(exact, nowMs);
+    };
     sortedTxns(h).forEach(function (t) {
-      var gross = num(t.shares) * num(t.price), ms = Math.min(monthMs(t.month), nowMs);
+      var gross = num(t.shares) * num(t.price), ms = flowMs(t);
       if (t.type === "sell") out.push({ t: ms, v: toBaseAtMonth(gross - num(t.fees), h.currency, t.month) });
       else out.push({ t: ms, v: -toBaseAtMonth(gross + num(t.fees), h.currency, t.month) });
     });
     (h.dividends || []).forEach(function (d) {
-      out.push({ t: Math.min(monthMs(d.month), nowMs), v: toBaseAtMonth(num(d.amount), h.currency, d.month) });
+      out.push({ t: flowMs(d), v: toBaseAtMonth(num(d.amount), h.currency, d.month) });
     });
     return out;
   }
@@ -1942,10 +2326,11 @@
   }
 
   // ---- Benchmark comparison + time-weighted return ------------------------------------------------
-  // "What if I'd put the same money in an index instead?" Each month's net contribution (the change in
-  // cost basis) buys the benchmark at that month's close; we then track that hypothetical portfolio's
+  // "What if I'd put the same money in an index instead?" Each month's inferred contribution (the change in
+  // contributionCost) buys the benchmark at that month's close; we then track that hypothetical portfolio's
   // value alongside the real one. The index's OWN-currency total return is used - FX drift between the
-  // base currency and the index's currency is not modelled (a deliberate simplification for v1).
+  // base currency and the index's currency is not modelled. Sale withdrawals are approximate because
+  // contributionCost falls proportionally rather than by exact proceeds; XIRR uses exact ledger flows.
   var BENCHMARK_DEFAULT = "ACWI";   // iShares MSCI ACWI: a broad all-world equity default; user-overridable
   function benchmarkTicker() { return (db.settings.benchmark || "").trim() || BENCHMARK_DEFAULT; }
   function benchmarkHist() {
@@ -1972,7 +2357,8 @@
     return covered >= 2 ? out : null;
   }
   // Cumulative time-weighted return over a [{y:marketValue, cost}] sequence: chain each sub-period's growth
-  // with that period's net flow removed, so deposit TIMING doesn't distort it (unlike money-weighted XIRR).
+  // with that period's inferred contribution change removed. DRP pairs contribute zero; sale withdrawals
+  // remain an approximation until snapshots persist explicit period flows (XIRR already uses exact flows).
   // Returns a cumulative fraction (0.2 = +20% across the whole span), or null when not enough history.
   function portfolioTWR(pts) {
     var factor = 1, periods = 0;
@@ -2309,8 +2695,8 @@
     var dots = "", labels = "";
     for (i = 0; i < points.length; i++) {
       dots += '<span class="chart-dot" style="left:' + px(X(i)) + '%;top:' + py(Y(points[i].y)) + '%;background:#34d399"></span>';
-      if (points.length <= 14 || i % Math.ceil(points.length / 12) === 0)
-        labels += '<span class="chart-lbl chart-lbl-x" style="left:' + px(X(i)) + '%;top:' + py(h - 8) + '%">' + esc(points[i].x) + "</span>";
+      if (points.length <= 14 || i % Math.ceil(points.length / 12) === 0 || i === points.length - 1)
+        labels += '<span class="chart-lbl chart-lbl-x' + (i === 0 ? " chart-edge-start" : i === points.length - 1 ? " chart-edge-end" : "") + '" style="left:' + px(X(i)) + '%;top:' + py(h - 8) + '%">' + esc(points[i].x) + "</span>";
     }
     return '<div class="chart-wrap"><svg class="chart" viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;display:block">' +
       '<defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34d399" stop-opacity="0.28"/><stop offset="1" stop-color="#34d399" stop-opacity="0"/></linearGradient></defs>' +
@@ -2394,8 +2780,8 @@
     });
     var labels = "";
     points.forEach(function (p, i) {
-      if (points.length <= 14 || i % Math.ceil(points.length / 12) === 0)
-        labels += '<span class="chart-lbl chart-lbl-x" style="left:' + px(X(i)) + '%;top:' + py(h - 8) + '%;font-size:' + axisFs + 'px">' + esc(p.x) + "</span>";
+      if (points.length <= 14 || i % Math.ceil(points.length / 12) === 0 || i === points.length - 1)
+        labels += '<span class="chart-lbl chart-lbl-x' + (i === 0 ? " chart-edge-start" : i === points.length - 1 ? " chart-edge-end" : "") + '" style="left:' + px(X(i)) + '%;top:' + py(h - 8) + '%;font-size:' + axisFs + 'px">' + esc(p.x) + "</span>";
     });
     var legend = series.map(function (s) {
       return '<span style="margin-right:16px;font-size:12px;color:var(--text-dim)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' +
@@ -2432,7 +2818,7 @@
       var gv = (max / STEPS) * g, gy = Y(gv);
       grid += '<line x1="' + pad.l + '" y1="' + gy.toFixed(1) + '" x2="' + (w - pad.r) + '" y2="' + gy.toFixed(1) +
         '" stroke="' + (g === 0 ? "var(--chart-grid-strong)" : "var(--chart-grid)") + '" stroke-width="1" vector-effect="non-scaling-stroke"/>' +
-        '<text x="' + (pad.l - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="#6b7280">' + fmtCompact(gv) + "</text>";
+        '<text x="' + (pad.l - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="var(--chart-label)">' + fmtCompact(gv) + "</text>";
     }
 
     var bars = "", labels = "", vals = "";
@@ -2445,7 +2831,7 @@
         if (v > 0) vals += '<text x="' + (x + (barW - 2) / 2).toFixed(1) + '" y="' + (y - 3).toFixed(1) +
           '" text-anchor="middle" font-size="8.5" fill="' + s.color + '">' + fmtCompact(v) + "</text>";
       });
-      labels += '<text x="' + gx.toFixed(1) + '" y="' + (h - 8) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + esc(p.x) + "</text>";
+      labels += '<text x="' + gx.toFixed(1) + '" y="' + (h - 8) + '" text-anchor="middle" font-size="10" fill="var(--chart-label)">' + esc(p.x) + "</text>";
     });
     var legend = series.map(function (s) {
       return '<span style="margin-right:16px;font-size:12px;color:var(--text-dim)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' +
@@ -2466,12 +2852,46 @@
   function languageMode() {
     return db.settings && db.settings.language === "it" ? "it" : "en";
   }
+  var a11yControlSeq = 0;
+  function enhanceRenderedAccessibility(root) {
+    var baseEl = root && root.querySelectorAll ? root : document;
+    Array.prototype.forEach.call(baseEl.querySelectorAll(".field > label"), function (label) {
+      if (label.htmlFor || label.querySelector("input,select,textarea")) return;
+      var field = label.parentElement;
+      var control = field && field.querySelector("input:not([type=hidden]),select,textarea");
+      if (!control) return;
+      if (!control.id) control.id = "field-control-" + (++a11yControlSeq);
+      label.htmlFor = control.id;
+    });
+    Array.prototype.forEach.call(baseEl.querySelectorAll("button[title]:not([aria-label]),select[title]:not([aria-label]),input[title]:not([aria-label])"), function (control) {
+      control.setAttribute("aria-label", control.getAttribute("title"));
+    });
+    Array.prototype.forEach.call(baseEl.querySelectorAll(".rc-btn,.cf-tab,.fchip,.seg-btn,.theme-btn,.language-btn"), function (control) {
+      control.setAttribute("aria-pressed", String(control.classList.contains("on") || control.classList.contains("active")));
+    });
+    Array.prototype.forEach.call(baseEl.querySelectorAll(".nav-item,.settings-nav-item"), function (control) {
+      if (control.classList.contains("active")) control.setAttribute("aria-current", "page");
+      else control.removeAttribute("aria-current");
+    });
+    var named = [
+      [".period-year", "Viewing period year"],
+      [".period-month", "Viewing period month"],
+      [".tax-year-sel", "Tax year"],
+      ["#cf-sort", "Sort transactions by"],
+      ["#q-share", "Your share percentage"]
+    ];
+    named.forEach(function (pair) {
+      var control = baseEl.querySelector(pair[0]);
+      if (control && !control.hasAttribute("aria-label")) control.setAttribute("aria-label", trUI(pair[1]));
+    });
+  }
   function applyLanguageUI(root) {
     if (window.ValutioI18N && window.ValutioI18N.apply) {
       window.ValutioI18N.apply(root || document, languageMode());
     } else {
       try { document.documentElement.lang = languageMode(); } catch (e) { }
     }
+    enhanceRenderedAccessibility(root || document);
   }
   function trUI(text) {
     return (window.ValutioI18N && window.ValutioI18N.translate) ? window.ValutioI18N.translate(text, languageMode()) : text;
@@ -2554,13 +2974,14 @@
         '" data-act="tutorial-dot" data-step="' + k + '" title="Step ' + (k + 1) + '"></button>';
     }).join("");
     var modalRoot = document.getElementById("modal-root");
+    if (!modalRoot.contains(document.activeElement)) modalReturnFocus = document.activeElement;
     modalRoot.innerHTML =
       '<div class="tut-blocker dim"></div>' +
-      '<div class="tut-card">' +
+      '<div class="tut-card" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" tabindex="-1">' +
       '<div class="tut-progress"><div class="tut-progress-fill" style="transform:scaleX(' + ((i + 1) / TUTORIAL_STEPS.length).toFixed(4) + ')"></div></div>' +
       '<div class="tut-ico">' + icon(s.ico) + "</div>" +
       '<div class="tut-step">Step ' + (i + 1) + " of " + TUTORIAL_STEPS.length + "</div>" +
-      "<h3>" + s.title + "</h3>" +
+      '<h3 id="tutorial-title">' + s.title + "</h3>" +
       '<p class="tut-body">' + s.body + "</p>" +
       '<div class="tut-dots">' + dots + "</div>" +
       '<div class="tut-foot">' +
@@ -2570,6 +2991,9 @@
       '<button type="button" class="btn primary" data-act="tutorial-next">' + (last ? "Got it" : "Next") + "</button>" +
       "</div></div></div>";
     applyLanguageUI(modalRoot);
+    bindModalKeyboard(modalRoot, { noBgClose: true, dialogSelector: ".tut-card" });
+    var tutorialDialog = modalRoot.querySelector(".tut-card");
+    if (tutorialDialog) tutorialDialog.focus();
   }
 
   // ----------------------------------------------------------
@@ -2578,26 +3002,34 @@
   var toastTimer;
   function toast(msg) {
     var root = document.getElementById("toast-root");
-    root.innerHTML = '<div class="toast">' + esc(msg) + "</div>";
+    pendingUndo = null;
+    root.innerHTML = '<div class="toast" role="status" aria-live="polite" aria-atomic="true">' + esc(msg) + "</div>";
     applyLanguageUI(root);
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { root.innerHTML = ""; }, 2600);
   }
-  // Toast with an Undo button. `undoFn` runs if the user clicks Undo within the grace window.
+  // Persistent action toast: Undo stays available until the user chooses Undo/Dismiss or another toast
+  // replaces it, avoiding a short timed action that keyboard and screen-reader users can miss.
   var pendingUndo = null;
   function toastUndo(msg, undoFn) {
     pendingUndo = undoFn;
     var root = document.getElementById("toast-root");
-    root.innerHTML = '<div class="toast toast-action"><span>' + esc(msg) + '</span>' +
-      '<button type="button" class="toast-undo" data-act="undo-delete">' + icon("refresh") + ' Undo</button></div>';
+    root.innerHTML = '<div class="toast toast-action" role="status" aria-live="assertive" aria-atomic="true"><span>' + esc(msg) + '</span>' +
+      '<button type="button" class="toast-undo" data-act="undo-delete">' + icon("refresh") + ' Undo</button>' +
+      '<button type="button" class="toast-dismiss" data-act="dismiss-undo" aria-label="Dismiss">' + icon("close") + '</button></div>';
     applyLanguageUI(root);
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { root.innerHTML = ""; pendingUndo = null; }, 6500);
+    var undoButton = root.querySelector('[data-act="undo-delete"]');
+    if (undoButton) undoButton.focus();
   }
   function runUndo() {
     var u = pendingUndo; pendingUndo = null; clearTimeout(toastTimer);
     var root = document.getElementById("toast-root"); if (root) root.innerHTML = "";
-    if (u) u();
+    if (u) { u(); toast("Restored"); }
+  }
+  function dismissUndo() {
+    pendingUndo = null; clearTimeout(toastTimer);
+    var root = document.getElementById("toast-root"); if (root) root.innerHTML = "";
   }
   // Refresh summary with failures: same action-toast shell as Undo, but the button opens a modal
   // listing exactly WHICH holdings kept their old price. The list lives only until the next
@@ -2606,7 +3038,7 @@
   function fetchFailToast(msg, fails) {
     lastFetchFails = fails || [];
     var root = document.getElementById("toast-root");
-    root.innerHTML = '<div class="toast toast-action"><span>' + esc(msg) + '</span>' +
+    root.innerHTML = '<div class="toast toast-action" role="status" aria-live="polite" aria-atomic="true"><span>' + esc(msg) + '</span>' +
       '<button type="button" class="toast-undo" data-act="show-fetch-fails">' + icon("chevron") + ' View more</button></div>';
     applyLanguageUI(root);
     clearTimeout(toastTimer);
@@ -2629,7 +3061,7 @@
   function updateToast(applyFn) {
     pendingUpdate = applyFn;
     var root = document.getElementById("toast-root"); if (!root) return;
-    root.innerHTML = '<div class="toast toast-action"><span>A new version is available.</span>' +
+    root.innerHTML = '<div class="toast toast-action" role="status" aria-live="polite" aria-atomic="true"><span>A new version is available.</span>' +
       '<button type="button" class="toast-undo" data-act="apply-update">' + icon("refresh") + ' Refresh</button></div>';
     applyLanguageUI(root);
     clearTimeout(toastTimer);   // stays until the user acts (don't auto-dismiss an update prompt)
@@ -2661,21 +3093,54 @@
     });
     return added;
   }
+  var modalReturnFocus = null, modalKeyHandler = null, modalTitleSeq = 0;
+  function bindModalKeyboard(root, opts) {
+    if (modalKeyHandler) root.removeEventListener("keydown", modalKeyHandler);
+    modalKeyHandler = function (e) {
+      if (e.key === "Escape" && !opts.noBgClose) { e.preventDefault(); closeModal(); return; }
+      if (e.key !== "Tab") return;
+      var modal = root.querySelector(opts.dialogSelector || ".modal"); if (!modal) return;
+      var focusable = Array.prototype.filter.call(modal.querySelectorAll('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'), function (el) {
+        return !el.hidden && el.offsetParent !== null;
+      });
+      if (!focusable.length) { e.preventDefault(); modal.focus(); return; }
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    root.addEventListener("keydown", modalKeyHandler);
+  }
   function openModal(opts) {
     var root = document.getElementById("modal-root");
+    if (!root.contains(document.activeElement)) modalReturnFocus = document.activeElement;
     if (opts.bare) {
       root.innerHTML =
-        '<div class="modal-bg" data-modal-bg><div class="modal m-bare ' + (opts.cls ? opts.cls : "") + '">' +
+        '<div class="modal-bg" data-modal-bg><div class="modal m-bare ' + (opts.cls ? opts.cls : "") + '" role="dialog" aria-modal="true" tabindex="-1">' +
         (opts.body || "") + "</div></div>";
       if (!opts.noBgClose) root.querySelector("[data-modal-bg]").addEventListener("mousedown", function (e) {
         if (e.target.hasAttribute("data-modal-bg")) closeModal();
       });
       applyLanguageUI(root);
+      var bareDialog = root.querySelector(".modal");
+      var bareHeading = bareDialog && bareDialog.querySelector("h1,h2,h3");
+      if (bareDialog && bareHeading) {
+        if (!bareHeading.id) bareHeading.id = "modal-title-" + (++modalTitleSeq);
+        bareDialog.setAttribute("aria-labelledby", bareHeading.id);
+      } else if (bareDialog) {
+        bareDialog.setAttribute("aria-label", trUI(opts.ariaLabel || opts.title || "Dialog"));
+      }
+      bindModalKeyboard(root, opts);
+      if (!opts.noAutoFocus && bareDialog) {
+        var bareFocus = (opts.initialFocus && bareDialog.querySelector(opts.initialFocus)) ||
+          bareDialog.querySelector("[autofocus],input:not([type=hidden]),select,textarea,[data-act=install-now],button,a[href]");
+        (bareFocus || bareDialog).focus();
+      }
       return;
     }
+    var titleId = "modal-title-" + (++modalTitleSeq);
     root.innerHTML =
-      '<div class="modal-bg" data-modal-bg><div class="modal m-banded ' + (opts.wide ? "wide" : "") + (opts.cls ? " " + opts.cls : "") + '">' +
-      '<div class="m-hd"><h3>' + esc(opts.title) + '</h3>' +
+      '<div class="modal-bg" data-modal-bg><div class="modal m-banded ' + (opts.wide ? "wide" : "") + (opts.cls ? " " + opts.cls : "") + '" role="dialog" aria-modal="true" aria-labelledby="' + titleId + '" tabindex="-1">' +
+      '<div class="m-hd"><h3 id="' + titleId + '">' + esc(opts.title) + '</h3>' +
       '<button type="button" class="m-x" data-act="close-modal" aria-label="Close">' + icon("close") + '</button></div>' +
       '<form id="modal-form"><div class="m-bd">' +
       (opts.sub ? '<div class="modal-sub">' + opts.sub + "</div>" : "") +
@@ -2685,16 +3150,27 @@
     var form = document.getElementById("modal-form");
     form.addEventListener("submit", function (e) {
       e.preventDefault();
-      if (opts.onSubmit() !== false) closeModal();
+      if (typeof opts.onSubmit !== "function" || opts.onSubmit() !== false) closeModal();
     });
     if (!opts.noBgClose) root.querySelector("[data-modal-bg]").addEventListener("mousedown", function (e) {
       if (e.target.hasAttribute("data-modal-bg")) closeModal();
     });
     applyLanguageUI(root);
-    var f = form.querySelector("input,select,textarea");
+    bindModalKeyboard(root, opts);
+    var f = opts.initialFocus && root.querySelector(opts.initialFocus);
+    if (!f) f = form.querySelector("input,select,textarea");
+    if (!f && opts.danger) f = form.querySelector('.modal-foot [data-act="close-modal"]');
+    if (!f) f = form.querySelector('button[type="submit"]');
     if (f && !opts.noAutoFocus) f.focus();
+    else if (!opts.noAutoFocus) root.querySelector(".modal").focus();
   }
-  function closeModal() { document.getElementById("modal-root").innerHTML = ""; }
+  function closeModal() {
+    var root = document.getElementById("modal-root");
+    if (modalKeyHandler) { root.removeEventListener("keydown", modalKeyHandler); modalKeyHandler = null; }
+    root.innerHTML = "";
+    var target = modalReturnFocus; modalReturnFocus = null;
+    if (target && target.focus && document.documentElement.contains(target)) target.focus();
+  }
   // Styled danger-confirm modal (replaces native window.confirm so every delete uses the same UI).
   function confirmDelete(title, sub, onConfirm, submitLabel) {
     openModal({ title: title, sub: sub, danger: true, submitLabel: submitLabel || "Delete", onSubmit: onConfirm });
@@ -2929,8 +3405,8 @@
 
   function dashboardPage() {
     var m = state.month;
-    var snaps = db.snapshots.slice().sort(function (a, b) { return a.month < b.month ? -1 : 1; });
-    var snap = snapByMonth(m);
+    var snaps = db.snapshots.slice().sort(function (a, b) { return a.month < b.month ? -1 : 1; }).map(function (s) { return snapshotForView(s); });
+    var snap = snaps.filter(function (s) { return s.month === m; })[0];
     var isCurrent = (m === currentMonth());
     var useSnap = !isCurrent && !!snap;   // viewing a frozen past month
 
@@ -3309,8 +3785,8 @@
       if (a.joint) parts.push(a.share + "%");
       if (a.currency !== base()) parts.push(fmt(a.balance, a.currency));
       var actions = a.hist
-        ? '<button class="btn sm ghost" data-act="edit-frozen-account" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-frozen-account" data-id="' + a.id + '">\u2715</button>'
-        : '<button class="btn sm ghost" data-act="edit-account" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-account" data-id="' + a.id + '">\u2715</button>';
+        ? '<button class="btn sm ghost" data-act="edit-frozen-account" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-frozen-account" data-id="' + a.id + '" aria-label="Delete ' + esc(a.name) + ' from this frozen month">\u2715</button>'
+        : '<button class="btn sm ghost" data-act="edit-account" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-account" data-id="' + a.id + '" aria-label="Delete account ' + esc(a.name) + '">\u2715</button>';
       return { color: col, name: esc(a.name), meta: parts.join(" \u00b7 "), valueHtml: fmtBase(a.base), base: a.base, actions: actions };
     });
     var body = list.length ? accHero + dataBarList(accRows, total)
@@ -3530,7 +4006,7 @@
   // Investments focal hero: Market Value + total-unrealized chip, fused with the value-over-time trend,
   // then a "this month" performance rail (unrealized move, market return %, realized booked) + cost basis.
   function investHero(tot, count, trendPts, trendRange, md, ytdUnreal, rangeBar, totRealized, winPct, ext) {
-    var unrealPct = tot.cost > 0 ? tot.unreal / tot.cost : 0;
+    var totalReturnPct = tot.cost > 0 ? (tot.unreal + tot.real) / tot.cost : null;
     // Chart: overlay the benchmark ("same contributions into an index") as a second line when we have
     // its history; otherwise the plain single-line value trend.
     var benchOn = ext && ext.benchShown && ext.benchShown.filter(function (v) { return v != null; }).length >= 2;
@@ -3581,7 +4057,7 @@
     var INV_REG = {
       costBasis:     { label: "Cost Basis",            cell: kpiCell("Cost Basis", fmtBase(tot.cost, 0), "Total invested", "down") },
       costMonth:     { label: "Cost This Month",       cell: kpiCell("Cost This Month", fmtBase(costInMonth(state.month), 0), "Invested in " + moLbl, "down") },
-      totalReturn:   { label: "Total Return %",        cell: kpiCell("Total Return %", (unrealPct >= 0 ? "+" : "") + pct(unrealPct), "Unrealized on cost", signClass(unrealPct)) },
+      totalReturn:   { label: "Total Return %",        cell: kpiCell("Total Return %", totalReturnPct == null ? "-" : (totalReturnPct >= 0 ? "+" : "") + pct(totalReturnPct), "Total P/L on remaining cost", totalReturnPct == null ? "" : signClass(totalReturnPct)) },
       annualReturn:  { label: "Annualized Return",     cell: kpiCell("Annualized Return", annRet == null ? "-" : (annRet >= 0 ? "+" : "") + pct(annRet), annRet == null ? "Needs 3+ months of history" : "Money-weighted - per year", annRet == null ? "" : signClass(annRet)) },
       twReturn:      { label: "Time-Weighted Return",  cell: kpiCell("Time-Weighted Return", (ext && ext.twr != null) ? ((ext.twr >= 0 ? "+" : "") + pct(ext.twr)) : "-", (ext && ext.twr != null) ? "Cumulative - timing-neutral" : "Needs 3+ months of history", (ext && ext.twr != null) ? signClass(ext.twr) : "") },
       vsBenchmark:   { label: "vs Benchmark",          cell: (ext && ext.benchEnd != null) ? kpiCell("vs Benchmark", ((ext.mv - ext.benchEnd) >= 0 ? "+" : "−") + fmtBase(Math.abs(ext.mv - ext.benchEnd), 0), benchmarkTicker() + " - same contributions", signClass(ext.mv - ext.benchEnd)) : kpiCell("vs Benchmark", "-", "Refresh to load " + benchmarkTicker(), "") },
@@ -3644,7 +4120,7 @@
       var badge = snap ? statusBadge(esc(monthLabel(m)), icon("lock") + "Frozen", "frozen")
         : statusBadge(esc(monthLabel(m)), "Empty", "neutral");
       var invSnapsP = snaps.filter(function (s) { return s.month <= m; });
-      var invTrendPtsP = invSnapsP.map(function (s) { return { x: monthLabel(s.month).slice(0, 3), y: num(s.invest), t: monthMs(s.month), m: s.month, cost: num(s.cost) }; });
+      var invTrendPtsP = invSnapsP.map(function (s) { return { x: monthLabel(s.month).slice(0, 3), y: num(s.invest), t: monthMs(s.month), m: s.month, cost: num(s.contributionCost == null ? s.cost : s.contributionCost) }; });
       var invRangeP = invSnapsP.length ? shortMonth(invSnapsP[0].month) + " \u2192 " + shortMonth(m) : "";
       var prevInvP = null; snaps.forEach(function (s) { if (s.month < m) prevInvP = s; });
       var invYrStartP = null, cyP = m.slice(0, 4) + "-01"; snaps.forEach(function (s) { if (s.month < cyP) invYrStartP = s; });
@@ -3705,8 +4181,8 @@
     shadeHoldingSegs(holdSegs);
 
     var invSnaps = snaps.filter(function (s) { return s.month <= currentMonth(); });
-    var invTrendPts = invSnaps.map(function (s) { return { x: monthLabel(s.month).slice(0, 3), y: num(s.invest), t: monthMs(s.month), m: s.month, cost: num(s.cost) }; });
-    invTrendPts.push({ x: "Now", y: pf.mv, t: Date.now(), m: currentMonth(), cost: pf.cost });
+    var invTrendPts = invSnaps.map(function (s) { return { x: monthLabel(s.month).slice(0, 3), y: num(s.invest), t: monthMs(s.month), m: s.month, cost: num(s.contributionCost == null ? s.cost : s.contributionCost) }; });
+    invTrendPts.push({ x: "Now", y: pf.mv, t: Date.now(), m: currentMonth(), cost: pf.contributionCost });
     var invSpan = invTrendPts.length >= 2 ? (invTrendPts[invTrendPts.length - 1].t - invTrendPts[0].t) / 86400000 : 0;
     var invShown = filterTrend(invTrendPts, state.invRange);
     // Benchmark overlay ("same contributions into an index") + time-weighted return, aligned to the chart.
@@ -3794,20 +4270,20 @@
     var hAnn = xirr(holdingFlows(h), m.marketValueBase);   // this holding's money-weighted yearly rate
 
     var txRows = ledger.slice().reverse().map(function (r) {
-      var t = r.t, isBuy = t.type === "buy";
-      return "<tr><td><strong>" + esc(monthLabel(t.month)) + "</strong></td>" +
-        '<td><span class="tag" style="color:' + (isBuy ? "var(--pos)" : "var(--neg)") + ";background:color-mix(in oklch," + (isBuy ? "var(--pos)" : "var(--neg)") + ' 18%,transparent)">' + (isBuy ? "BUY" : "SELL") + "</span></td>" +
+      var t = r.t, isBuy = t.type === "buy", isDrp = t.origin === "drp" && t.linkId;
+      return "<tr><td><strong>" + esc(validDateString(t.date) ? t.date : monthLabel(t.month)) + "</strong></td>" +
+        '<td><span class="tag" style="color:' + (isBuy ? "var(--pos)" : "var(--neg)") + ";background:color-mix(in oklch," + (isBuy ? "var(--pos)" : "var(--neg)") + ' 18%,transparent)">' + (isDrp ? "DRP" : (isBuy ? "BUY" : "SELL")) + "</span></td>" +
         '<td class="num">' + (isBuy ? "" : "−") + (+num(t.shares).toFixed(6)) + "</td>" +
         '<td class="num">' + fmt(t.price, cur) + "</td>" +
         '<td class="num">' + (isBuy ? fmt(r.cost, cur) : fmt(r.gross, cur)) + "</td>" +
         '<td class="num">' + fmt(t.fees, cur) + "</td>" +
         '<td class="num">' + (+r.sharesAfter.toFixed(6)) + "</td>" +
         '<td class="num ' + (r.realized == null ? "" : signClass(r.realized)) + '">' + (r.realized == null ? "-" : signFmt(r.realized, cur)) + "</td>" +
-        '<td class="right nowrap"><div class="txn-actions"><button class="btn sm ghost" data-act="edit-txn" data-id="' + t.id + '" data-hold="' + h.id + '">Edit</button> <button class="btn sm ghost" data-act="del-txn" data-id="' + t.id + '" data-hold="' + h.id + '">×</button></div></td></tr>';
+        '<td class="right nowrap"><div class="txn-actions"><button class="btn sm ghost" data-act="' + (isDrp ? "edit-drp" : "edit-txn") + '" data-id="' + esc(isDrp ? t.linkId : t.id) + '" data-hold="' + esc(h.id) + '">Edit</button> <button class="btn sm ghost" data-act="' + (isDrp ? "del-drp" : "del-txn") + '" data-id="' + esc(isDrp ? t.linkId : t.id) + '" data-hold="' + esc(h.id) + '" aria-label="' + esc(isDrp ? "Delete reinvestment" : "Delete transaction") + '">×</button></div></td></tr>';
     }).join("");
 
     var ledgerTable = (h.transactions || []).length ?
-      '<div class="table-wrap txn-scroll"><table class="txn-table"><colgroup><col style="width:11%"><col style="width:11%"><col style="width:10%"><col style="width:11%"><col style="width:13%"><col style="width:9%"><col style="width:10%"><col style="width:12%"><col style="width:13%"></colgroup><thead><tr><th>Month</th><th>Action</th><th class="num">Shares</th><th class="num">Price</th>' +
+      '<div class="table-wrap txn-scroll"><table class="txn-table"><colgroup><col style="width:11%"><col style="width:11%"><col style="width:10%"><col style="width:11%"><col style="width:13%"><col style="width:9%"><col style="width:10%"><col style="width:12%"><col style="width:13%"></colgroup><thead><tr><th>Date</th><th>Action</th><th class="num">Shares</th><th class="num">Price</th>' +
       '<th class="num">Cost / Sold Value</th><th class="num">Fees</th><th class="num">Total Shares</th><th class="num">Realized P/L</th><th></th></tr></thead><tbody>' +
       txRows + "</tbody>" + txFooter + "</table></div>" :
       emptyState("expenses", "No transactions yet", "Add your first buy to start tracking this holding.");
@@ -3833,7 +4309,7 @@
           '<div class="hd-rows">' +
             '<div class="hd-row"><span class="hd-k">Unrealized P/L</span><span class="hd-v ' + signClass(m.unrealized) + '">' + signFmt(m.unrealized, cur) + '</span></div>' +
             '<div class="hd-row"><span class="hd-k">Current Price</span><span class="hd-v hd-v-price"><button class="btn sm ghost" data-act="price-holding" data-id="' + h.id + '" title="Update price">' + ICON.refresh + '</button>' + fmt(m.price, cur) + '</span></div>' +
-            '<div class="hd-row"><span class="hd-k">Total Shares</span><span class="hd-v">' + (+m.shares.toFixed(6)) + '</span></div>' +
+            '<div class="hd-row"><span class="hd-k">Total Shares</span><span class="hd-v hd-v-reconcile"><span class="hd-share-count">' + (+m.shares.toFixed(6)) + '</span><button type="button" class="btn sm ghost" data-act="reconcile-shares" data-id="' + h.id + '" aria-label="' + esc("Reconcile shares for " + h.name) + '">Reconcile</button></span></div>' +
             '<div class="hd-row"><span class="hd-k">Cost Basis</span><span class="hd-v" style="color:var(--neg)">' + fmt(m.cost, cur) + '</span></div>' +
             '<div class="hd-row"><span class="hd-k">Total Fees</span><span class="hd-v" style="color:var(--neg)">' + fmt(totalFees, cur) + '</span></div>' +
             '<div class="hd-row"><span class="hd-k">Avg Buy Price</span><span class="hd-v">' + (m.avgBuyPrice ? fmt(m.avgBuyPrice, cur) : "-") + '</span></div>' +
@@ -3855,11 +4331,12 @@
       ". Accumulating funds reinvest internally - leave this empty for them." +
       (divs.length ? " Total " + fmt(divTotal, cur) + " - trailing-12-month yield " + pct(divYield) + "." : "") + "</p>" +
       (divs.length ?
-        '<div class="table-wrap div-scroll"><table><thead><tr><th>Month</th><th class="num">Amount</th><th>Note</th><th></th></tr></thead><tbody>' +
+        '<div class="table-wrap div-scroll"><table><thead><tr><th>Date</th><th class="num">Amount</th><th>Note</th><th></th></tr></thead><tbody>' +
         divs.slice().reverse().map(function (d) {
-          return "<tr><td><strong>" + esc(monthLabel(d.month)) + "</strong></td>" +
-            '<td class="num up">' + fmt(d.amount, cur) + "</td><td>" + esc(d.note || "") + "</td>" +
-            '<td class="right nowrap"><button class="btn sm ghost" data-act="edit-dividend" data-id="' + d.id + '" data-hold="' + h.id + '">Edit</button> <button class="btn sm ghost" data-act="del-dividend" data-id="' + d.id + '" data-hold="' + h.id + '">×</button></td></tr>';
+          var isDrp = d.origin === "drp" && d.linkId;
+          return "<tr><td><strong>" + esc(validDateString(d.date) ? d.date : monthLabel(d.month)) + "</strong></td>" +
+            '<td class="num up">' + fmt(d.amount, cur) + "</td><td>" + (isDrp ? '<span class="tag">DRP</span> ' : "") + esc(d.note || "") + "</td>" +
+            '<td class="right nowrap"><button class="btn sm ghost" data-act="' + (isDrp ? "edit-drp" : "edit-dividend") + '" data-id="' + esc(isDrp ? d.linkId : d.id) + '" data-hold="' + esc(h.id) + '">Edit</button> <button class="btn sm ghost" data-act="' + (isDrp ? "del-drp" : "del-dividend") + '" data-id="' + esc(isDrp ? d.linkId : d.id) + '" data-hold="' + esc(h.id) + '" aria-label="' + esc(isDrp ? "Delete reinvestment" : "Delete dividend") + '">×</button></td></tr>';
         }).join("") + "</tbody></table></div>" :
         emptyState("income", "No dividends logged", "Use “+ Dividend” (top right) to record distributions you received.")) + "</div>";
   }
@@ -3903,9 +4380,9 @@
       var off = (k / S) * half, gv = maxSide * (k / S);
       var yUp = mid - off, yDn = mid + off;
       grid += '<line x1="' + pad.l + '" y1="' + yUp.toFixed(1) + '" x2="' + (w - pad.r) + '" y2="' + yUp.toFixed(1) + '" stroke="' + (k === 0 ? "var(--chart-grid-strong)" : "var(--chart-grid)") + '" vector-effect="non-scaling-stroke"/>' +
-        '<text x="' + (pad.l - 6) + '" y="' + (yUp + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="#6b7280">' + fmtCompact(gv) + "</text>";
+        '<text x="' + (pad.l - 6) + '" y="' + (yUp + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="var(--chart-label)">' + fmtCompact(gv) + "</text>";
       if (k > 0) grid += '<line x1="' + pad.l + '" y1="' + yDn.toFixed(1) + '" x2="' + (w - pad.r) + '" y2="' + yDn.toFixed(1) + '" stroke="var(--chart-grid)" vector-effect="non-scaling-stroke"/>' +
-        '<text x="' + (pad.l - 6) + '" y="' + (yDn + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="#6b7280">' + fmtCompact(gv) + "</text>";
+        '<text x="' + (pad.l - 6) + '" y="' + (yDn + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="var(--chart-label)">' + fmtCompact(gv) + "</text>";
     }
     var inner = grid;
     pts.forEach(function (p, i) {
@@ -3919,7 +4396,7 @@
         inner += '<rect x="' + (g - bw / 2).toFixed(1) + '" y="' + mid.toFixed(1) + '" width="' + bw + '" height="' + eH.toFixed(1) + '" rx="3" fill="var(--neg)"/>' +
           '<text x="' + g.toFixed(1) + '" y="' + (mid + eH + 12).toFixed(1) + '" text-anchor="middle" font-size="9.5" fill="var(--neg)">' + fmtCompact(exp) + "</text>";
       }
-      inner += '<text x="' + g.toFixed(1) + '" y="' + (h - 8) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + esc(p.x) + "</text>";
+      inner += '<text x="' + g.toFixed(1) + '" y="' + (h - 8) + '" text-anchor="middle" font-size="10" fill="var(--chart-label)">' + esc(p.x) + "</text>";
     });
     return ieLegendHTML() + '<svg class="chart" viewBox="0 0 ' + w + " " + h + '" style="width:100%;height:auto;display:block">' + inner + "</svg>";
   }
@@ -3934,12 +4411,12 @@
     for (var k = 0; k <= S; k++) {
       var gv = max / S * k, gy = Y(gv);
       grid += '<line x1="' + pad.l + '" y1="' + gy.toFixed(1) + '" x2="' + (w - pad.r) + '" y2="' + gy.toFixed(1) + '" stroke="' + (k === 0 ? "var(--chart-grid-strong)" : "var(--chart-grid)") + '" vector-effect="non-scaling-stroke"/>' +
-        '<text x="' + (pad.l - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="#6b7280">' + fmtCompact(gv) + "</text>";
+        '<text x="' + (pad.l - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="9.5" fill="var(--chart-label)">' + fmtCompact(gv) + "</text>";
     }
     var lineOf = function (key) { return pts.map(function (p, i) { return (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(num(p[key])).toFixed(1); }).join(" "); };
     var areaOf = function (key) { return lineOf(key) + " L" + X(nn - 1).toFixed(1) + " " + (pad.t + ih) + " L" + X(0).toFixed(1) + " " + (pad.t + ih) + " Z"; };
     var dotsOf = function (key, c) { return pts.map(function (p, i) { return '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(num(p[key])).toFixed(1) + '" r="3" fill="' + c + '"/>'; }).join(""); };
-    var labels = pts.map(function (p, i) { return '<text x="' + X(i).toFixed(1) + '" y="' + (h - 8) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + esc(p.x) + "</text>"; }).join("");
+    var labels = pts.map(function (p, i) { return '<text x="' + X(i).toFixed(1) + '" y="' + (h - 8) + '" text-anchor="middle" font-size="10" fill="var(--chart-label)">' + esc(p.x) + "</text>"; }).join("");
     return ieLegendHTML() + '<svg class="chart" viewBox="0 0 ' + w + " " + h + '" style="width:100%;height:auto;display:block">' +
       grid +
       '<path d="' + areaOf("exp") + '" fill="var(--neg)" fill-opacity="0.14"/>' +
@@ -4045,7 +4522,7 @@
   }
 
   function historyPage() {
-    var allSnaps = db.snapshots.slice().sort(function (a, b) { return a.month < b.month ? -1 : 1; });
+    var allSnaps = db.snapshots.slice().sort(function (a, b) { return a.month < b.month ? -1 : 1; }).map(function (s) { return snapshotForView(s); });
     var nowYear = String(new Date().getFullYear());
     var curYear = state.month.slice(0, 4);
     var scope = state.histScope || "last12";
@@ -4063,7 +4540,7 @@
     var cm = currentMonth();
     var lpf = portfolioTotals();
     var liveRow = {
-      month: cm, live: true, netWorth: netWorthAfterDebts(), invest: lpf.mv, cost: lpf.cost,
+      month: cm, live: true, netWorth: netWorthAfterDebts(), invest: lpf.mv, cost: lpf.cost, contributionCost: lpf.contributionCost,
       unrealized: lpf.unreal, realized: totalRealizedAllTime(),
       income: monthTotal(db.incomes, cm), expenses: monthTotal(db.expenses, cm),
     };
@@ -4100,7 +4577,7 @@
     var histPill = histDelta == null ? "" : '<span class="' + (histDelta >= 0 ? "pill-up" : "pill-down") + '">' + (histDelta >= 0 ? "+" : "") + pct(histDelta) + "</span>";
 
     // hero headline = the selected month's net worth (live for the current month, frozen otherwise)
-    var selM = state.month, selSnap = snapByMonth(selM), selIsCur = (selM === currentMonth());
+    var selM = state.month, selSnap = allSnaps.filter(function (s) { return s.month === selM; })[0], selIsCur = (selM === currentMonth());
     var selView, selSub;
     if (selIsCur) { var spf = portfolioTotals(); selView = { nw: netWorthAfterDebts(), has: true }; selSub = "Live - " + esc(monthLabel(selM)); }
     else if (selSnap) { selView = { nw: num(selSnap.netWorth), has: true }; selSub = "Frozen - " + esc(monthLabel(selM)); }
@@ -4275,11 +4752,11 @@
     var selectedCur = draft.currency || base();
     var btn = function (k, label) {
       var on = kind === k, c = k === "expense" ? "var(--neg)" : "var(--pos)", soft = k === "expense" ? "var(--neg-soft)" : "var(--pos-soft)";
-      return '<button type="button" class="rc-btn" data-act="set-cf-addkind" data-kind="' + k + '" ' +
+      return '<button type="button" class="rc-btn' + (on ? " on" : "") + '" data-act="set-cf-addkind" data-kind="' + k + '" aria-pressed="' + (on ? "true" : "false") + '" ' +
         'style="font-size:12.5px;padding:5px 14px;font-weight:700;border:1px solid ' + (on ? "color-mix(in oklch, " + c + " 42%, transparent)" : "transparent") + ";" +
         "color:" + (on ? c : "var(--text)") + ";background:" + (on ? soft : "transparent") + '">' + label + "</button>";
     };
-    return '<div class="txn-kind"><span class="range-chips" style="padding:3px;gap:3px">' + btn("expense", "Expense") + btn("income", "Income") + "</span></div>" +
+    return '<div class="txn-kind"><span class="range-chips" role="group" aria-label="Transaction type" style="padding:3px;gap:3px">' + btn("expense", "Expense") + btn("income", "Income") + "</span></div>" +
       '<form id="quick-ledger" class="qa-cmd txn-form">' +
         '<div class="field"><label>Amount</label><div class="qa-amt"><span class="qa-sign" style="color:' + flowColor + '">' + flowSign + '</span>' +
           '<input id="q-amt" type="number" step="0.01" min="0.01" placeholder="0.00" value="' + esc(draft.amount || "") + '" required autofocus></div></div>' +
@@ -4416,7 +4893,7 @@
         '<td class="num" style="color:' + col + '">' + (inc ? "+" : "\u2212") + fmtBase(r.b, 2) + '</td>' +
         '<td class="num">' + fmt(r.x.amount, r.x.currency) + ' <span class="badge-curr">' + esc(r.x.currency) + '</span></td>' +
         '<td class="right"><button class="btn sm ghost" data-act="edit-ledger" data-id="' + r.x.id + '" data-kind="' + r.kind + '">Edit</button> ' +
-        '<button class="btn sm ghost" data-act="del-ledger" data-id="' + r.x.id + '" data-kind="' + r.kind + '">\u2715</button></td></tr>';
+        '<button class="btn sm ghost" data-act="del-ledger" data-id="' + r.x.id + '" data-kind="' + r.kind + '" aria-label="Delete ' + r.kind + ' ' + esc(r.x.category) + '">\u2715</button></td></tr>';
       }).join("");
     }
     var EXPENSE_TABLE_H = 464; // header + 8 compact rows + footer - body scrolls, footer stays pinned
@@ -4468,7 +4945,7 @@
         var sign = isIncome ? "+" : "−";
         return '<span class="chip recur-chip">' +
           esc(r.category) + " - " + sign + fmt(r.amount, r.currency) + (r.note ? " - " + esc(r.note) : "") +
-          '<span class="x" data-act="del-recurring" data-id="' + r.id + '" title="Stop repeating">×</span></span>';
+          '<button type="button" class="x" data-act="del-recurring" data-id="' + r.id + '" title="Stop repeating" aria-label="Stop repeating ' + esc(r.category) + '">×</button></span>';
       }).join("") : '<span class="muted">' + empty + '</span>';
       return '<div class="panel mb cf-recurring-card">' +
         '<div class="flex between center mb"><h2 style="margin:0;display:inline-flex;align-items:center;gap:8px">' + icon("refresh") + esc(title) + '</h2>' +
@@ -4579,8 +5056,10 @@
         (existing ? '<div class="field"><label>Saved so far</label><input id="g-saved" type="number" step="any" value="' + esc(g.currentSavings || 0) + '"></div>' : ""),
       onSubmit: function () {
         var name = val("g-name").trim(); if (!name) return false;
-        var cost = num(val("g-cost")); if (!(cost > 0)) { toast("Enter a target cost"); return false; }
-        var saved = existing ? num(val("g-saved")) : 0;
+        var costInput = validatedInputNumber("g-cost", "target cost", { positive: true });
+        var savedInput = existing ? validatedInputNumber("g-saved", "saved amount", { min: 0, blankIsZero: true }) : { ok: true, value: 0 };
+        if (!costInput.ok || !savedInput.ok) return false;
+        var cost = costInput.value, saved = savedInput.value;
         var obj = { id: existing ? existing.id : uid(), name: name, cost: cost, currency: val("g-cur"), targetMonth: val("g-month"), currentSavings: saved };
         if (existing) { var i = db.goals.findIndex(function (x) { return x.id === existing.id; }); db.goals[i] = obj; }
         else db.goals.push(obj);
@@ -4632,7 +5111,7 @@
           '<span class="tag">Target ' + esc(monthLabel(g.targetMonth)) + '</span>' +
           '<span class="dcard-bal">' + fmt(saved, g.currency, 0) + '<span style="color:var(--text-3);font-weight:600"> / ' + fmt(cost, g.currency, 0) + '</span></span>' +
           '<span class="dcard-act">' + (done ? "" : '<button class="btn sm primary" data-act="add-contribution" data-id="' + g.id + '">Contribute</button> ') +
-            '<button class="btn sm ghost" data-act="edit-goal" data-id="' + g.id + '">Edit</button> <button class="btn sm ghost" data-act="del-goal" data-id="' + g.id + '">\u2715</button></span>' +
+            '<button class="btn sm ghost" data-act="edit-goal" data-id="' + g.id + '">Edit</button> <button class="btn sm ghost" data-act="del-goal" data-id="' + g.id + '" aria-label="Delete goal ' + esc(g.name) + '">\u2715</button></span>' +
         '</div>' +
         '<div class="dcard-grid">' +
           gcStat("Progress", pct0 + "%") +
@@ -4664,7 +5143,9 @@
         '<div class="field"><label class="check-row"><input type="checkbox" id="as-include"' + (a.includeInNetWorth ? " checked" : "") + "> Include in Net Worth Calculations</label></div>",
       onSubmit: function () {
         var name = val("as-name").trim(); if (!name) return false;
-        var obj = { id: existing ? existing.id : uid(), name: name, category: val("as-cat"), value: num(val("as-value")), currency: val("as-cur"), includeInNetWorth: checked("as-include"), nwMode: val("as-mode") === "full" ? "full" : "equity" };
+        var valueInput = validatedInputNumber("as-value", "asset value", { min: 0 });
+        if (!valueInput.ok) return false;
+        var obj = { id: existing ? existing.id : uid(), name: name, category: val("as-cat"), value: valueInput.value, currency: val("as-cur"), includeInNetWorth: checked("as-include"), nwMode: val("as-mode") === "full" ? "full" : "equity" };
         if (existing) { var i = db.physicalAssets.findIndex(function (x) { return x.id === existing.id; }); db.physicalAssets[i] = obj; }
         else db.physicalAssets.push(obj);
         save(); render(); toast("Asset saved");
@@ -4696,7 +5177,7 @@
       var parts = [a.category, status];
       if (a.includeInNetWorth && equityMode && linked > 0) parts.push(fmtBase(full, 0) + " \u2212 " + fmtBase(linked, 0) + " loan");
       else if (a.currency !== base()) parts.push(fmt(num(a.value), a.currency));
-      var actions = '<button class="btn sm ghost" data-act="edit-asset" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-asset" data-id="' + a.id + '">\u2715</button>';
+      var actions = '<button class="btn sm ghost" data-act="edit-asset" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-asset" data-id="' + a.id + '" aria-label="Delete asset ' + esc(a.name) + '">\u2715</button>';
       return { color: assetCatColor(a.category), name: esc(a.name), meta: parts.join(" \u00b7 "), valueHtml: fmtBase(aBase), base: aBase, actions: actions };
     });
     return head + assetsHero + dataBarList(assetRows, total);
@@ -4726,12 +5207,15 @@
     if (payment <= balance * r) return Infinity;
     return Math.ceil(-Math.log(1 - (r * balance) / payment) / Math.log(1 + r));
   }
-  // Equity for a mortgage linked to a property Asset: asset value - outstanding balance (base currency).
+  // Equity for a mortgage-linked property uses every debt attached to that
+  // property. A property may legitimately have a first and second mortgage;
+  // subtracting only the current row would overstate its equity.
   function debtEquity(d) {
     if (d.type !== "mortgage" || !d.propertyAssetId) return null;
     var a = (db.physicalAssets || []).filter(function (x) { return x.id === d.propertyAssetId; })[0];
     if (!a) return null;
-    return { equity: toBase(num(a.value), a.currency) - toBase(num(d.balance), d.currency), propBase: toBase(num(a.value), a.currency), asset: a };
+    var propBase = toBase(num(a.value), a.currency);
+    return { equity: propBase - linkedDebtsBase(a.id), propBase: propBase, asset: a };
   }
   function debtModal(existing) {
     var d = existing || { name: "", type: "mortgage", balance: "", currency: base(), apr: "", payment: "", propertyAssetId: "", logMode: "interest" };
@@ -4759,7 +5243,11 @@
       onSubmit: function () {
         var name = val("d-name").trim(); if (!name) return false;
         var type = val("d-type");
-        var obj = { id: existing ? existing.id : uid(), name: name, type: type, balance: num(val("d-balance")), currency: val("d-cur"), apr: num(val("d-apr")), payment: num(val("d-payment")), propertyAssetId: type === "mortgage" ? val("d-asset") : "", logMode: val("d-log") === "full" ? "full" : "interest", lastClose: existing ? (existing.lastClose || "") : "" };
+        var balanceInput = validatedInputNumber("d-balance", "debt balance", { min: 0 });
+        var aprInput = validatedInputNumber("d-apr", "APR", { min: 0, blankIsZero: true });
+        var paymentInput = validatedInputNumber("d-payment", "monthly payment", { min: 0, blankIsZero: true });
+        if (!balanceInput.ok || !aprInput.ok || !paymentInput.ok) return false;
+        var obj = { id: existing ? existing.id : uid(), name: name, type: type, balance: balanceInput.value, currency: val("d-cur"), apr: aprInput.value, payment: paymentInput.value, propertyAssetId: type === "mortgage" ? val("d-asset") : "", logMode: val("d-log") === "full" ? "full" : "interest", lastClose: existing ? (existing.lastClose || "") : "" };
         db.debts = db.debts || [];
         if (existing) { var i = db.debts.findIndex(function (x) { return x.id === existing.id; }); db.debts[i] = obj; }
         else db.debts.push(obj);
@@ -4776,8 +5264,11 @@
     }
     var totalOwed = debts.reduce(function (s, d) { return s + toBase(num(d.balance), d.currency); }, 0);
     var monthly = debts.reduce(function (s, d) { return s + toBase(num(d.payment), d.currency); }, 0);
-    var homeEquity = 0;
-    debts.forEach(function (d) { var e = debtEquity(d); if (e) homeEquity += e.equity; });
+    var homeEquity = 0, equityAssets = {};
+    debts.forEach(function (d) {
+      var e = debtEquity(d);
+      if (e && !equityAssets[e.asset.id]) { equityAssets[e.asset.id] = 1; homeEquity += e.equity; }
+    });
     var gross = grossNetWorth(), debtsNW = debtsTotalBase(), netAfter = netWorthAfterDebts();
     var debtSegs = [];
     DEBT_TYPES.forEach(function (t) {
@@ -4808,7 +5299,7 @@
           '<span class="dcard-nm">' + esc(d.name) + '</span>' +
           '<span class="tag ' + t.tag + '">' + esc(t.label) + (e ? " \u00b7 " + esc(e.asset.name) + (isEquityAsset(e.asset) ? " equity" : "") : "") + '</span>' +
           '<span class="dcard-bal">' + fmtBase(dBase) + '</span>' +
-          '<span class="dcard-act"><button class="btn sm ghost" data-act="edit-debt" data-id="' + d.id + '">Edit</button> <button class="btn sm ghost" data-act="del-debt" data-id="' + d.id + '">\u2715</button></span>' +
+          '<span class="dcard-act"><button class="btn sm ghost" data-act="edit-debt" data-id="' + d.id + '">Edit</button> <button class="btn sm ghost" data-act="del-debt" data-id="' + d.id + '" aria-label="Delete debt ' + esc(d.name) + '">\u2715</button></span>' +
         '</div>' +
         '<div class="dcard-grid">' +
           dcStat("APR", num(d.apr) ? num(d.apr).toFixed(2) + "%" : "-") +
@@ -5076,7 +5567,7 @@
         '<td class="num">' + fmt(iv.amount, iv.currency) + ' <span class="badge-curr">' + esc(iv.currency) + "</span></td>" +
         '<td class="num">' + fmt(inTax, t.currency) + rateBadge + "</td>" +
         '<td class="num">' + fmt(inTax * c.effRate, t.currency) + "</td>" +
-        '<td class="right nowrap"><button class="btn sm ghost" data-act="edit-invoice" data-id="' + iv.id + '">Edit</button> <button class="btn sm ghost" data-act="del-invoice" data-id="' + iv.id + '">×</button></td>' + "</tr>";
+        '<td class="right nowrap"><button class="btn sm ghost" data-act="edit-invoice" data-id="' + iv.id + '">Edit</button> <button class="btn sm ghost" data-act="del-invoice" data-id="' + iv.id + '" aria-label="Delete invoice ' + esc(iv.note || iv.date || "") + '">×</button></td>' + "</tr>";
     }).join("");
     var invTable = yearInvoices.length ?
       '<div class="table-wrap inv-scroll"><table class="tax-invoice-table"><thead><tr><th>Date</th><th>Note</th><th class="num">Amount</th><th class="num">In ' + esc(t.currency) +
@@ -5219,9 +5710,9 @@
   // The FY label ("YYYY/YY") that should be ACTIVE today for the selected country, flipping exactly on
   // that country's tax-year-end date (e.g. AU → 1 July, the day after 30 June). Kept in the app's
   // canonical Jul/26-style "YYYY/YY" format so it lines up with stored db.tax.year labels.
-  function expectedFYLabel(d) {
+  function expectedFYLabel(d, countryCode) {
     d = d || new Date();
-    var fe = countryFYEnd(db.settings.country, d.getFullYear()), mo = d.getMonth() + 1, day = d.getDate();
+    var fe = countryFYEnd(countryCode || db.settings.country, d.getFullYear()), mo = d.getMonth() + 1, day = d.getDate();
     var past = (mo > fe.m) || (mo === fe.m && day > fe.d);   // strictly AFTER the FY-end date → new FY (the end date itself is still the old year)
     var start = past ? d.getFullYear() : d.getFullYear() - 1;
     return start + "/" + String((start + 1) % 100).padStart(2, "0");
@@ -5230,10 +5721,10 @@
   // Behind-the-scenes fiscal-year freeze: when today's date has crossed the country's official
   // tax-year-end, archive the active year and roll forward (catching up multiple boundaries) using the
   // same freeze execution as the old manual button - no UI, no prompt.
-  function maybeAutoFreezeTaxYear() {
+  function maybeAutoFreezeTaxYear(today) {
     if (!db.tax) return false;
-    if (!db.tax.year) { db.tax.year = expectedFYLabel(); return false; }
-    var expected = expectedFYLabel(), cur = db.tax, did = false, guard = 0, archivedRealYear = false, skippedEmptyYears = 0;
+    if (!db.tax.year) { db.tax.year = expectedFYLabel(today); return false; }
+    var expected = expectedFYLabel(today), cur = db.tax, did = false, guard = 0, archivedRealYear = false, skippedEmptyYears = 0;
     while (cur.year !== expected && fyStartYear(cur.year) < fyStartYear(expected) && guard++ < 12) {
       db.taxArchive = db.taxArchive || [];
       if (!archivedRealYear) {
@@ -5245,8 +5736,12 @@
         skippedEmptyYears++;
       }
       cur.year = nextFYLabel(cur.year);
+      if (cur.presetManaged === true) {
+        var nextPreset = taxPresetForYear(cur.country || db.settings.country, cur.year);
+        if (nextPreset) applyPresetRatesToRecord(cur, nextPreset, cur.country || db.settings.country, cur.year);
+      }
       cur.invoices = [];
-      cur.employmentIncome = 0; cur.employmentTaxPaid = 0; cur.otherIncome = 0;
+      cur.employmentIncome = 0; cur.employmentTaxPaid = 0; cur.otherIncome = 0; cur.deductions = 0;
       cur.capitalLossCarryIn = num(cur.capitalLossCarryOut); cur.capitalLossCarryOut = num(cur.capitalLossCarryIn);
       cur.sourceSnapshot = null;
       cur.paid = false; cur.paidAt = null;   // the new live year starts unsettled (the archived copy keeps its own paid status)
@@ -5405,7 +5900,7 @@
         '<td class="num">' + (c.code === base() ? "1.0000 (base)" : num(c.rate).toFixed(4)) + "</td>" +
         '<td class="right">' + (c.code === base() ? "" :
           '<button class="btn sm ghost" data-act="edit-currency" data-id="' + c.code + '">Edit</button>' +
-          '<button class="btn sm ghost" data-act="del-currency" data-id="' + c.code + '">×</button>') + "</td></tr>";
+          '<button class="btn sm ghost" data-act="del-currency" data-id="' + c.code + '" aria-label="Delete currency ' + esc(c.code) + '">×</button>') + "</td></tr>";
     }).join("");
     var currencies =
       '<div class="panel mb"><div class="flex between center mb"><div><h2>Currencies & FX</h2><p class="hint">Choose from the full currency catalog. This table only shows currencies currently used by your wallet.</p></div>' +
@@ -5421,7 +5916,7 @@
       // card endlessly - extra rows are sliced off (like the dashboard allocation). The "+ Add" button
       // sits OUTSIDE the box so it stays reachable even when the chips clip.
       return '<div class="cat-chips">' + list.map(function (c) {
-        return '<span class="chip"><span class="chip-dot" style="background:' + dot + '"></span>' + esc(c) + '<span class="x" data-act="del-category" data-kind="' + kind + '" data-id="' + esc(c) + '">×</span></span>';
+        return '<span class="chip"><span class="chip-dot" style="background:' + dot + '"></span>' + esc(c) + '<button type="button" class="x" data-act="del-category" data-kind="' + kind + '" data-id="' + esc(c) + '" aria-label="Delete category ' + esc(c) + '">×</button></span>';
       }).join("") + "</div>" +
         '<button class="btn sm" data-act="add-category" data-kind="' + kind + '">+ Add</button>';
     };
@@ -5446,14 +5941,14 @@
       '<button class="btn primary" data-act="add-account">+ Add Account</button></div>' +
       (db.accounts.length ? db.accounts.map(function (a) {
         return '<span class="chip">' + esc(a.name) + " - " + esc(a.bucket) + " - " + fmt(a.balance, a.currency) +
-          '<span class="x" data-act="del-account" data-id="' + a.id + '">×</span></span>';
+          '<button type="button" class="x" data-act="del-account" data-id="' + a.id + '" aria-label="Delete account ' + esc(a.name) + '">×</button></span>';
       }).join("") : '<div class="muted">No accounts yet.</div>') + "</div>";
     var holdingsMini =
       '<div class="panel mb"><div class="flex between center mb"><h2>Holdings</h2>' +
       '<button class="btn primary" data-act="add-holding">+ Add Holding</button></div>' +
       (db.holdings.length ? sortHoldingsByTypeMv(db.holdings, function (h) { return holdingMetrics(h).marketValueBase; }).map(function (h) {
         return '<span class="chip">' + esc(h.name) + " - " + esc(typeMeta(h.type).label) +
-          '<span class="x" data-act="del-holding" data-id="' + h.id + '">×</span></span>';
+          '<button type="button" class="x" data-act="del-holding" data-id="' + h.id + '" aria-label="Delete holding ' + esc(h.name || h.ticker) + '">×</button></span>';
       }).join("") : '<div class="muted">No holdings yet.</div>') + "</div>";
 
     // market data (keyless live prices)
@@ -5519,10 +6014,10 @@
     ];
     // Ordered by category so the in-list dividers stay contiguous. (Draft set - trim later.)
     var faqData = [
-      ["plans", "Is Valutio really free?", "Yes - completely. Valutio is <strong>free and open source</strong>: every feature is unlocked for everyone, with no accounts, no subscriptions, no ads and nothing locked away. Track your whole net worth, investments, cash flow, tax and more, with no entry caps."],
-      ["plans", "Does it cost anything? Is there a catch?", "No cost and no catch. There\u2019s nothing to buy and nothing to unlock. If Valutio is useful to you and you\u2019d like to support its development, you can leave a small tip on <a href=\"https://ko-fi.com/salvatoresorvillo\" target=\"_blank\" rel=\"noopener\">Ko-fi</a> - entirely optional, and everything stays free either way."],
-      ["plans", "Will it ever expire, add limits or start charging?", "No. Valutio isn\u2019t a trial and won\u2019t start charging later - there are no time limits and no entry caps, and every past month you track is kept."],
-      ["plans", "Do I get future updates?", "Yes - <strong>every update is free, for everyone</strong>. The app updates itself: when a new version ships you\u2019ll see a small \u201cnew version available - Refresh\u201d prompt (or it applies automatically the next time you open the app). No reinstall, no app store, nothing to download."],
+      ["plans", "Is Valutio really free?", "Yes. The current Valutio community app is <strong>free and open source</strong>: every feature in this version is available without an account or subscription, there are no ads in this version, and there are no entry caps."],
+      ["plans", "Does it cost anything? Is there a catch?", "There is nothing to buy or unlock in the current community app. If Valutio is useful to you and you\u2019d like to support its development, you can leave an optional tip on <a href=\"https://ko-fi.com/salvatoresorvillo\" target=\"_blank\" rel=\"noopener\">Ko-fi</a>. Optional paid services or supported editions may be offered separately in the future."],
+      ["plans", "Will it ever expire, add limits or start charging?", "The current community app is not a trial and has no time limits or entry caps. Valutio may offer optional paid services or supported editions in the future; versions already released remain available under the open-source license under which they were published."],
+      ["plans", "Do I get future updates?", "Community-app updates are delivered when new versions are published: you\u2019ll see a small \u201cnew version available - Refresh\u201d prompt, or the update will apply the next time you open the app. Optional future services may have separate terms or pricing."],
       ["plans", "Who is Valutio for?", "Investors, freelancers and anyone living across currencies - if you want auto-refreshing stock, ETF, bond, commodity &amp; crypto prices, tax estimates, rebalancing against a target allocation, a secondary currency with live FX, retirement projections, or full month-by-month history, Valutio is for you."],
       ["start", "How do I add my first account or holding?", "On Accounts or Investments, press <strong>+ Add</strong> and fill the short form. Every total recalculates automatically - no rows to insert or formulas to patch."],
       ["start", "Is there a quick way to update all my balances at month-end?", "Yes - on <strong>Accounts</strong>, hit <strong>Update Balances</strong>: one form lists every account, asset and debt with its current figure prefilled. Tab through, type the new statement values, and save once."],
@@ -5537,7 +6032,7 @@
       ["data", "Where is my data stored? Is it private?", "Everything lives only in this browser, on this PC. There\u2019s no account and no cloud - nothing you enter ever leaves your computer. It’s stored in your browser on this device, and Valutio asks the browser to keep it so it isn’t cleared automatically to free up space."],
       ["data", "How do I back it up or move to another computer?", "Settings \u2192 Your Data \u2192 <strong>Export JSON</strong> saves a backup file; <strong>Import JSON</strong> restores it on any browser or machine. Your data travels with the file - import it on the new machine and everything comes right back. Because the data lives only here, export every couple of weeks."],
       ["data", "Will clearing my browser data delete my wallet?", "Yes. Valutio asks your browser to keep the data durable, so it isn’t wiped automatically to free up space - but deliberately clearing this site’s data, or switching to another browser or device, still removes the only copy. Keep an exported backup before doing any of that."],
-      ["data", "Can I import or export an Excel workbook?", "Yes. Settings \u2192 Your Data \u2192 <strong>Import Full Workbook</strong> reads a .xlsx/.xls profile after preview and can replace accounts, holdings, cash flow, tax invoices, retirement inputs and currencies. Use JSON for a full-fidelity backup or restore. For append-only cash-flow uploads, use <strong>Import Income</strong> or <strong>Import Expenses</strong>. <strong>Export Excel</strong> writes a spreadsheet-friendly workbook, and <strong>Download Template</strong> gives you the layout Valutio can read back in."],
+      ["data", "Can I import or export an Excel workbook?", "Yes. Settings \u2192 Your Data \u2192 <strong>Import Full Workbook</strong> reads a .xlsx/.xls profile after preview and can replace accounts, holdings, cash flow, tax invoices, retirement inputs and currencies. Use JSON for a full-fidelity backup or restore. For append-only cash-flow uploads, use <strong>Import Income</strong> or <strong>Import Expenses</strong>. <strong>Export Excel</strong> writes a spreadsheet-friendly workbook, and <strong>Download Template</strong> gives you the layout Valutio can read back in. <span>Workbooks containing linked dividend reinvestments are intentionally blocked on re-import; use JSON to restore those records without losing their linkage.</span>"],
       ["data", "Can I export my data as CSV for a spreadsheet?", "Yes - <strong>Investments</strong>, <strong>History</strong> and <strong>Cash Flow</strong> each have a <strong>CSV</strong> button in their header that downloads that table as a spreadsheet-ready file. Export JSON (Settings \u2192 Your Data) remains the full backup format."],
       ["data", "Is my data encrypted?", "Your live data sits unencrypted in this browser\u2019s storage on your own machine, so keep your computer secured. For backups, <strong>Settings \u2192 Your Data \u2192 Export Encrypted</strong> password-protects the file with AES-256 - useful before storing it in the cloud or on a shared device. There\u2019s no password recovery, so keep that password safe."],
       ["data", "How do I reset everything and start over?", "Settings \u2192 Your Data \u2192 <strong>Reset everything</strong> wipes the wallet clean. Export a backup first if there\u2019s any chance you\u2019ll want it back."],
@@ -5554,6 +6049,7 @@
       ["tax", "Can I track my freelance invoices?", "Yes - on the <strong>Tax</strong> page, add each invoice as you send it. Valutio totals your freelance income, locks in the exchange rate on the invoice\u2019s date when it\u2019s in another currency, and rolls it into your estimated tax and \u201cset aside\u201d figure. Each tax year\u2019s invoices are archived when the year freezes."],
       ["tax", "What\u2019s the Capital Gains Reserve?", "An estimate of the tax to set aside on your current <em>unrealized</em> gains if you sold today - separate from the tax on gains you\u2019ve actually realized this tax year."],
       ["tax", "How does the app work out a holding\u2019s profit/loss?", "It walks your buy/sell ledger with a weighted-average cost basis: P/L is current market value minus cost, plus any gains realized on sales."],
+      ["tax", "How do I add shares received through dividend reinvestment?", "Open the holding, choose Reconcile beside Total Shares, then enter the broker total, exact allocation date and total dividend reinvested. Valutio adds one linked dividend and share acquisition without overwriting your buys. Use it only for a full reinvestment; record a normal dividend and buy separately if there was withholding, a fee, cash left over or extra money added."],
       ["tax", "What is the Annualized Return figure?", "A money-weighted yearly rate (XIRR): it accounts for <em>when</em> each buy, sell and dividend happened and compresses your whole investing history into one % per year - comparable to a fund\u2019s published return. Swap it into an Investments summary card via the card\u2019s corner selector; each holding\u2019s page shows its own."],
       ["tax", "What is Time-Weighted Return, and how is it different?", "<strong>Time-Weighted Return (TWR)</strong> chains together each period\u2019s growth with your deposits and withdrawals removed, so it measures how your <em>choices</em> performed regardless of <em>when</em> you added money - it\u2019s the standard \u201cfund manager\u201d figure. <strong>Annualized Return (money-weighted / XIRR)</strong> instead reflects your actual euro outcome, including timing. Both live on the Investments cards; seeing them side by side tells you whether your picks or your timing drove the result."],
       ["tax", "How does the benchmark comparison work?", "On the Investments value chart, Valutio draws a second line showing what your portfolio would be worth if you\u2019d put the <strong>same contributions, on the same dates, into a benchmark index</strong> instead - so you can see at a glance whether you\u2019re beating the market. Choose the index in <strong>Settings \u2192 Market Data \u2192 Investment Benchmark</strong> (any Yahoo symbol, e.g. ACWI, SPY, URTH); it defaults to a broad all-world index. Note: the comparison uses the index\u2019s own-currency return and doesn\u2019t model exchange-rate moves between it and your base currency."],
@@ -5656,11 +6152,11 @@
       "</div>";
 
     var donateSection = '<div class="panel mb"><h2>Donate</h2>' +
-      '<p class="hint mb">Valutio is <strong>free and open source</strong> - every feature is unlocked for everyone, with no accounts, subscriptions or ads. If it helps you, a small tip keeps it going. Entirely optional, and thank you.</p>' +
+      '<p class="hint mb">The current Valutio community app is <strong>free and open source</strong>, requires no account or subscription, and has no advertising in this version. If it helps you, an optional tip supports its development. Thank you.</p>' +
       '<div class="flex center gap wrap">' +
         '<button class="btn primary" data-act="donate">' + icon("wallet") + ' Donate on Ko-fi</button>' +
       '</div>' +
-      '<p class="hint" style="margin:12px 0 0">No pressure - Valutio stays completely free whether or not you ever tip.</p></div>';
+      '<p class="hint" style="margin:12px 0 0">No pressure - tipping does not unlock features in the community app.</p></div>';
     var legal =
       '<div class="panel mb legal-doc"><h2>Legal &amp; Disclaimer</h2>' +
       '<p class="hint mb">Please read this before relying on anything Valutio shows you.</p>' +
@@ -5668,7 +6164,7 @@
       '<div class="help-box" style="margin:0 0 14px"><strong>Estimates &amp; accuracy.</strong> Prices, exchange rates, valuations and tax figures may be delayed, incomplete or inaccurate, and tax results are rough estimates based on the settings you enter - not an official assessment. Verify anything important against your own records and official sources.</div>' +
       '<div class="help-box" style="margin:0 0 14px"><strong>Provided &quot;as is&quot;.</strong> Valutio is provided without warranties of any kind, express or implied, and you use it at your own risk. To the maximum extent permitted by law, the maker of Valutio is not liable for any loss or damage - including financial loss, lost profits, or lost or corrupted data - arising from your use of, or inability to use, the app.</div>' +
       '<div class="help-box" style="margin:0 0 14px"><strong>Your data is yours.</strong> Everything you enter is stored locally on this device and is never collected or sent to us; the only network requests fetch live market prices and exchange rates. You are responsible for your own backups - clearing your browser data or uninstalling will erase your records, so use Settings &rarr; Backups to keep copies.</div>' +
-      '<div class="help-box" style="margin:0"><strong>Free &amp; open source.</strong> Created and maintained by <strong>Salvatore Sorvillo</strong><span>.</span> Valutio is free and open source - there are no purchases, subscriptions or accounts. If it is useful to you, tips are welcome via <a href="https://ko-fi.com/salvatoresorvillo" target="_blank" rel="noopener">Ko-fi</a> (entirely optional). See our <a href="https://valutio.app/terms" target="_blank" rel="noopener">Terms</a> and <a href="https://valutio.app/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</div>' +
+      '<div class="help-box" style="margin:0"><strong>Free &amp; open source.</strong> <span>Created and maintained by</span> <strong>Salvatore Sorvillo</strong>. <span>Copyright &copy; 2026</span> <strong>Salvatore Sorvillo</strong>. <span>The current community app requires no purchase, subscription or account. Optional paid services or supported editions may be offered separately in the future. Tips are welcome via</span> <a href="https://ko-fi.com/salvatoresorvillo" target="_blank" rel="noopener">Ko-fi</a>. View the <a href="https://github.com/SalvatoreSorvillo/Valutio" target="_blank" rel="noopener">Source code</a>, <a href="LICENSE" target="_blank" rel="noopener">AGPL license</a>, <a href="https://valutio.app/terms" target="_blank" rel="noopener">Terms</a>, and <a href="https://valutio.app/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</div>' +
       '</div>';
     // Settings groups Profile + Currencies & FX into one top row; the wizard keeps them stacked.
     if (isWizard) {
@@ -5818,17 +6314,21 @@
       body: '<div class="ub-list">' + sec("Accounts", accs) + sec("Assets", assets) + sec("Debts", debts) + "</div>",
       submitLabel: "Save All",
       onSubmit: function () {
-        var changed = 0;
-        var apply = function (list, pfx, key) {
+        var changed = 0, pending = [];
+        var collect = function (list, pfx, key, label) {
           (list || []).forEach(function (x) {
             var e = document.getElementById(pfx + x.id); if (!e) return;
-            var v = num(e.value);
-            if (v !== num(x[key])) { x[key] = v; changed++; }
+            var v = decimalNumber(e.value);
+            if (v == null || v < 0) pending.push({ error: (x.name || label) + " needs a value of zero or higher" });
+            else pending.push({ row: x, key: key, value: v });
           });
         };
-        apply(db.accounts, "ub-a-", "balance");
-        apply(db.physicalAssets, "ub-p-", "value");
-        apply(db.debts, "ub-d-", "balance");
+        collect(db.accounts, "ub-a-", "balance", "Account");
+        collect(db.physicalAssets, "ub-p-", "value", "Asset");
+        collect(db.debts, "ub-d-", "balance", "Debt");
+        var invalid = pending.filter(function (item) { return item.error; })[0];
+        if (invalid) { toast(invalid.error); return false; }
+        pending.forEach(function (item) { if (item.value !== num(item.row[item.key])) { item.row[item.key] = item.value; changed++; } });
         recomputeAllSnapshots(); save(); render();
         toast(changed ? "Updated " + changed + " balance" + (changed === 1 ? "" : "s") : "No changes");
       },
@@ -5862,9 +6362,11 @@
         var bucket = val("a-bucket");
         if (bucket === "Other") { var custom = val("a-bucket-other").trim(); if (custom) bucket = custom; }
         var joint = checked("a-joint");
-        var sv = val("a-share");
-        var share = joint ? (sv === "" ? 50 : Math.max(0, Math.min(100, num(sv)))) : 100;
-        var obj = { id: existing ? existing.id : uid(), name: name, bucket: bucket, currency: val("a-cur"), balance: num(val("a-bal")), joint: joint, share: share, coOwner: joint ? val("a-coowner").trim() : "" };
+        var balanceInput = validatedInputNumber("a-bal", "account balance", { min: 0 });
+        var shareInput = joint ? (val("a-share") === "" ? { ok: true, value: 50 } : validatedInputNumber("a-share", "ownership share", { min: 0, max: 100 })) : { ok: true, value: 100 };
+        if (!balanceInput.ok || !shareInput.ok) return false;
+        var share = shareInput.value;
+        var obj = { id: existing ? existing.id : uid(), name: name, bucket: bucket, currency: val("a-cur"), balance: balanceInput.value, joint: joint, share: share, coOwner: joint ? val("a-coowner").trim() : "" };
         if (existing) { var i = db.accounts.findIndex(function (x) { return x.id === existing.id; }); db.accounts[i] = obj; }
         else db.accounts.push(obj);
         recomputeAllSnapshots();   // re-lens the live month for a changed joint share (closed months stay frozen)
@@ -5875,19 +6377,19 @@
 
   function holdingModal(existing) {
     var h = existing || { name: "", ticker: "", type: "stock", currency: base(), price: "", coingeckoId: "", apiSymbol: "" };
-    var holdToday = new Date().toISOString().slice(0, 10), holdDate = holdToday.slice(0, 7) === state.month ? holdToday : state.month + "-15";
+    var holdToday = localDateString(), holdDate = holdToday.slice(0, 7) === state.month ? holdToday : state.month + "-15";
     var initial = !existing ?
       '<div class="section-title" style="margin-top:18px">Initial position</div>' +
       '<div class="row"><div class="field"><label id="h-qty-label">Shares</label><input id="h-shares" type="number" step="any" min="0" placeholder="0" required></div>' +
       '<div class="field"><label id="h-buy-label">Buy price</label><input id="h-buy" type="number" step="any" min="0" placeholder="0.00" required></div>' +
       '<div class="field"><label>Fees</label><input id="h-fees" type="number" step="any" min="0" placeholder="0"></div>' +
-      '<div class="field"><label>Trade date</label><input id="h-date" type="date" value="' + holdDate + '" required></div></div>' : "";
+      '<div class="field"><label>Trade date</label><input id="h-date" type="date" max="' + holdToday + '" value="' + holdDate + '" required></div></div>' : "";
     openModal({
       title: existing ? "Edit Holding" : "Add Holding",
       wide: true,
       body:
         '<p class="hint" id="h-form-desc" style="margin:8px 0 18px">Set the Type, then search by name or ticker to auto-fill - live prices from (Yahoo Finance &amp; CoinGecko).</p>' +
-        '<div class="row" style="gap:8px">' +
+        '<div class="row holding-search-row" style="gap:8px">' +
         '<div class="field" style="flex:0 0 150px"><label>Type</label><select id="h-type">' +
         db.holdingTypes.slice().sort(function (a, b) { var ord = { stock: 0, etf: 1, bond: 2, commodity: 3, crypto: 4, realestate: 5 }; return (ord[a.key] == null ? 99 : ord[a.key]) - (ord[b.key] == null ? 99 : ord[b.key]); }).map(function (tt) { return '<option value="' + esc(tt.key) + '"' + (tt.key === h.type ? " selected" : "") + ">" + esc(tt.label) + "</option>"; }).join("") +
         '<option value="__add__">+ Add a type</option></select></div>' +
@@ -5918,6 +6420,7 @@
           var shRaw = normalizedDecimal(val("h-shares")), buyRaw = normalizedDecimal(val("h-buy")), feeRaw = normalizedDecimal(val("h-fees"));
           var sh = num(shRaw), buy = num(buyRaw), fees = num(feeRaw), tradeDate = val("h-date");
           if (!validDateString(tradeDate)) { toast("Enter a valid trade date"); return false; }
+          if (tradeDate > holdToday) { toast("Trade date cannot be in the future"); return false; }
           if (!(sh > 0)) { toast("Enter the initial position"); return false; }
           if (!(buy > 0)) { toast("Enter a buy price greater than zero"); return false; }
           if (fees < 0) { toast("Fees cannot be negative"); return false; }
@@ -5959,6 +6462,31 @@
   // After a holding's currency is changed in the editor, its numbers are kept as-is (just relabelled).
   // Offer to genuinely re-denominate every price/fee - and its frozen history - into the new currency at
   // the current rate. Cancel keeps the relabelled values.
+  function convertHoldingCurrencyValues(h, from, to) {
+    var liveFactor = convert(1, from, to);
+    if (!h || !(liveFactor > 0) || !isFinite(liveFactor)) return false;
+    (h.transactions || []).forEach(function (t) { t.price = num(t.price) * liveFactor; t.fees = num(t.fees) * liveFactor; });
+    (h.dividends || []).forEach(function (d) { d.amount = num(d.amount) * liveFactor; });
+    h.price = num(h.price) * liveFactor;
+    h.realizedSeed = num(h.realizedSeed) * liveFactor;
+    (db.snapshots || []).forEach(function (s) {
+      var fr = s.holdings && s.holdings[h.id]; if (!fr) return;
+      var oldRate = num(fr.rate) || (s.rates && num(s.rates[from])) || rateForMonth(from, s.month);
+      // A closed position is re-denominated at that month's own cross-rate when available. This keeps its
+      // native price/cost/realized fields, per-holding rate, and already-frozen base totals mathematically
+      // consistent instead of converting only the market price and leaving a mixed-currency record.
+      var newRate = (s.rates && num(s.rates[to]) > 0) ? num(s.rates[to]) : oldRate / liveFactor;
+      var frozenFactor = newRate > 0 ? oldRate / newRate : liveFactor;
+      ["buyPrice", "fees", "contributionCost", "price", "realized"].forEach(function (key) {
+        if (fr[key] != null) fr[key] = num(fr[key]) * frozenFactor;
+      });
+      fr.currency = to;
+      fr.rate = newRate > 0 ? newRate : oldRate / frozenFactor;
+      var fm = frozenHoldingMetrics(fr);
+      fr.mvBase = fm.marketValueBase; fr.costBase = fm.costBase;
+    });
+    return true;
+  }
   function currencyChangePrompt(h, from, to) {
     openModal({
       title: "Currency changed to " + esc(to),
@@ -5966,10 +6494,7 @@
       body: '<div class="help-box" style="margin:0">If those figures were actually in <strong>' + esc(from) + "</strong>, convert every buy/sell price &amp; fee (and this holding's frozen history) into <strong>" + esc(to) + "</strong> at the current rate. Otherwise keep them as-is.</div>",
       submitLabel: "Convert to " + esc(to),
       onSubmit: function () {
-        var f = convert(1, from, to);
-        (h.transactions || []).forEach(function (t) { t.price = num(t.price) * f; t.fees = num(t.fees) * f; });
-        h.price = num(h.price) * f;
-        (db.snapshots || []).forEach(function (s) { var fr = s.holdings && s.holdings[h.id]; if (fr) fr.price = num(fr.price) * f; });
+        convertHoldingCurrencyValues(h, from, to);
         repropagateHolding(h); save(); render();
         toast("Converted " + h.name + " to " + to);
       },
@@ -6028,19 +6553,202 @@
     });
   }
 
+  function holdingSharesDecimal(h, excludeTransactionId) {
+    var shares = "0";
+    sortedTxns(h).forEach(function (t) {
+      if (excludeTransactionId && t.id === excludeTransactionId) return;
+      shares = decimalAdd(shares, normalizedDecimal(t.shares), t.type === "sell");
+    });
+    return shares;
+  }
+  function displayShares(value) {
+    var n = num(value);
+    return isFinite(n) ? String(+n.toFixed(8)) : "-";
+  }
+  function findDrpEvent(h, linkId) {
+    if (!h || !linkId) return null;
+    var t = (h.transactions || []).filter(function (row) { return row.origin === "drp" && row.linkId === linkId; })[0];
+    var d = (h.dividends || []).filter(function (row) { return row.origin === "drp" && row.linkId === linkId; })[0];
+    return t && d ? { linkId: linkId, transaction: t, dividend: d } : null;
+  }
+  function newDrpLinkId() {
+    var used = {};
+    (db.holdings || []).forEach(function (h) {
+      (h.transactions || []).forEach(function (t) { if (t.linkId) used[t.linkId] = 1; });
+      (h.dividends || []).forEach(function (d) { if (d.linkId) used[d.linkId] = 1; });
+    });
+    var id = uid(); while (used[id]) id = uid();
+    return id;
+  }
+  function upsertDividendReinvestment(h, input, existingLinkId) {
+    if (!h) return { ok: false, message: "Holding not found" };
+    input = input || {};
+    var existing = existingLinkId ? findDrpEvent(h, existingLinkId) : null;
+    if (existingLinkId && !existing) return { ok: false, message: "This reinvestment could not be found" };
+    var date = String(input.date || ""), totalRaw = normalizedDecimal(input.totalShares), amountRaw = normalizedDecimal(input.amount);
+    if (!validDateString(date)) return { ok: false, message: "Enter a valid allocation date" };
+    if (date > localDateString()) return { ok: false, message: "Allocation date cannot be in the future" };
+    var baseRaw = holdingSharesDecimal(h, existing && existing.transaction.id);
+    var addedRaw = decimalAdd(totalRaw, baseRaw, true);
+    if (!(num(totalRaw) > 0)) return { ok: false, message: "Enter the total shares shown by your broker" };
+    if (!(num(addedRaw) > 0)) return { ok: false, message: "The broker total must be greater than the shares currently in Valutio" };
+    if (!(num(amountRaw) > 0)) return { ok: false, message: "Enter the total dividend reinvested" };
+    var selectedDividend = null;
+    if (!existing && input.existingDividendId) {
+      selectedDividend = (h.dividends || []).filter(function (d) { return d.id === input.existingDividendId && d.origin !== "drp" && !d.linkId; })[0];
+      if (!selectedDividend) return { ok: false, message: "The selected dividend is no longer available" };
+      if (selectedDividend.month !== date.slice(0, 7)) return { ok: false, message: "Choose an existing dividend from the same month as the allocation date" };
+      var selectedAmount = num(selectedDividend.amount), tolerance = Math.max(1e-8, Math.abs(selectedAmount) * 1e-10);
+      if (Math.abs(selectedAmount - num(amountRaw)) > tolerance) return { ok: false, message: "The selected dividend amount must match the total reinvested" };
+    }
+    var priceRaw = normalizedDecimal(String(num(amountRaw) / num(addedRaw)));
+    if (!(num(priceRaw) > 0)) return { ok: false, message: "The calculated issue price is invalid" };
+    var duplicate = (h.transactions || []).some(function (t) {
+      if (t === (existing && existing.transaction) || t.origin !== "drp" || t.date !== date) return false;
+      var d = (h.dividends || []).filter(function (row) { return row.origin === "drp" && row.linkId === t.linkId; })[0];
+      return d && Math.abs(num(t.shares) - num(addedRaw)) <= 1e-10 && Math.abs(num(d.amount) - num(amountRaw)) <= Math.max(1e-8, Math.abs(num(amountRaw)) * 1e-10);
+    });
+    if (duplicate) return { ok: false, message: "This reinvestment appears to be recorded already" };
+
+    var linkId = existingLinkId || newDrpLinkId();
+    var txn = Object.assign({}, existing ? existing.transaction : {}, {
+      id: existing ? existing.transaction.id : uid(),
+      month: date.slice(0, 7), date: date, datePrecision: "day",
+      sequence: existing ? existing.transaction.sequence : nextTransactionSequence(h),
+      type: "buy", shares: addedRaw, price: priceRaw, fees: "0", origin: "drp", linkId: linkId,
+    });
+    var dividendBase = existing ? existing.dividend : selectedDividend;
+    var dividend = Object.assign({}, dividendBase || {}, {
+      id: dividendBase ? dividendBase.id : uid(),
+      month: date.slice(0, 7), date: date, amount: amountRaw,
+      note: String(input.note || "").trim(), origin: "drp", linkId: linkId,
+    });
+    var proposedTxns = (h.transactions || []).map(function (t) { return existing && t === existing.transaction ? txn : t; });
+    if (!existing) proposedTxns.push(txn);
+    if (txnsOversell(proposedTxns)) return { ok: false, message: "This share total would make a later sale exceed the shares held" };
+    var proposedDividends = (h.dividends || []).map(function (d) {
+      return (existing && d === existing.dividend) || (!existing && selectedDividend && d === selectedDividend) ? dividend : d;
+    });
+    if (!existing && !selectedDividend) proposedDividends.push(dividend);
+    var candidate = Object.assign({}, h, { transactions: proposedTxns, dividends: proposedDividends });
+    var walletCandidate = { holdings: (db.holdings || []).map(function (row) { return row === h ? candidate : row; }) };
+    var pairErrors = drpPairValidationErrors(walletCandidate);
+    if (pairErrors.length) return { ok: false, message: pairErrors[0] };
+    h.transactions = proposedTxns; h.dividends = proposedDividends;
+    return { ok: true, event: { linkId: linkId, transaction: txn, dividend: dividend } };
+  }
+  function removeDividendReinvestment(h, linkId) {
+    var event = findDrpEvent(h, linkId); if (!event) return null;
+    var txIndex = h.transactions.indexOf(event.transaction), dividendIndex = h.dividends.indexOf(event.dividend);
+    h.transactions.splice(txIndex, 1); h.dividends.splice(dividendIndex, 1);
+    return { event: event, txIndex: txIndex, dividendIndex: dividendIndex };
+  }
+  function restoreDividendReinvestment(h, removed) {
+    if (!h || !removed || !removed.event) return false;
+    if (findDrpEvent(h, removed.event.linkId)) return false;
+    h.transactions.splice(Math.max(0, Math.min(removed.txIndex, h.transactions.length)), 0, removed.event.transaction);
+    h.dividends.splice(Math.max(0, Math.min(removed.dividendIndex, h.dividends.length)), 0, removed.event.dividend);
+    return true;
+  }
+  function dividendReinvestmentModal(h, linkId) {
+    if (!h) return;
+    var existing = linkId ? findDrpEvent(h, linkId) : null;
+    if (linkId && !existing) { toast("This reinvestment could not be found"); return; }
+    var currentRaw = holdingSharesDecimal(h), baseRaw = holdingSharesDecimal(h, existing && existing.transaction.id);
+    var today = localDateString();
+    var date = existing ? existing.transaction.date : today;
+    var unlinked = (h.dividends || []).filter(function (d) { return d.origin !== "drp" && !d.linkId; });
+    var sourceField = existing ? "" :
+      '<div class="field"><label>Link an existing dividend (optional)</label><select id="drp-source"><option value="">Create a new dividend</option>' +
+      unlinked.map(function (d) {
+        var when = validDateString(d.date) ? d.date : monthLabel(d.month);
+        return '<option value="' + esc(d.id) + '" data-month="' + esc(d.month) + '" data-amount="' + esc(d.amount) + '" data-note="' + esc(d.note || "") + '">Use dividend from ' + esc(when) + " - " + esc(fmt(d.amount, h.currency)) + "</option>";
+      }).join("") + '</select><p class="hint">Choose an existing dividend only if you already recorded this payment. Valutio will link it instead of counting the income twice.</p></div>';
+    openModal({
+      title: "Reconcile shares - " + h.name,
+      sub: "Match the shares shown by your broker by recording the difference as a dividend reinvestment. Valutio will not overwrite your transaction history.",
+      body:
+        '<div class="help-box"><div class="drp-summary" aria-label="Dividend reinvestment share summary">' +
+          '<div class="drp-summary-item"><span class="drp-summary-label">Shares in Valutio</span><strong class="drp-summary-value" id="drp-current">' + esc(displayShares(currentRaw)) + '</strong></div>' +
+          '<div class="drp-summary-item"><span class="drp-summary-label">Broker total shares</span><strong class="drp-summary-value" id="drp-broker">' + esc(displayShares(existing ? currentRaw : "")) + '</strong></div>' +
+          '<div class="drp-summary-item drp-summary-diff"><span class="drp-summary-label">Shares to add</span><strong class="drp-summary-value" id="drp-added">' + esc(existing ? displayShares(existing.transaction.shares) : "-") + '</strong></div>' +
+        '</div></div>' +
+        '<div class="row"><div class="field"><label>Broker total shares</label><input id="drp-total" type="number" step="any" min="0" value="' + esc(existing ? currentRaw : currentRaw) + '" inputmode="decimal" required></div>' +
+        '<div class="field"><label>Allocation date</label><input id="drp-date" type="date" max="' + today + '" value="' + esc(date) + '" required></div></div>' +
+        '<div class="row"><div class="field"><label>Total dividend reinvested (' + esc(h.currency) + ')</label><input id="drp-amount" type="number" step="any" min="0" value="' + esc(existing ? existing.dividend.amount : "") + '" inputmode="decimal" required></div>' +
+        '<div class="field"><label>Calculated issue price (' + esc(h.currency) + ')</label><output id="drp-price" class="input-output">-</output></div></div>' +
+        sourceField +
+        '<div class="field"><label>DRP statement or reference</label><input id="drp-note" value="' + esc(existing ? existing.dividend.note || "" : "") + '" placeholder="Optional"></div>' +
+        '<p id="drp-status" class="drp-status" role="status" aria-live="polite"></p>' +
+        '<div class="callout import-warn">' + icon("shield") + '<div>Use this only when the whole dividend bought these shares. If your statement shows cash left over, fees, withholding, or a different taxable amount, record the purchase and dividend separately.</div></div>' +
+        '<p class="hint">Closed months remain frozen. This reinvestment affects the live position and later open periods only.</p>',
+      submitLabel: existing ? "Update reinvestment" : "Record reinvestment",
+      onSubmit: function () {
+        var result = upsertDividendReinvestment(h, {
+          totalShares: val("drp-total"), date: val("drp-date"), amount: val("drp-amount"),
+          existingDividendId: val("drp-source"), note: val("drp-note"),
+        }, existing && existing.linkId);
+        if (!result.ok) { toast(result.message); return false; }
+        repropagateHolding(h); save(); render();
+        toast(existing ? "Reinvestment updated" : "Reinvestment recorded");
+      },
+    });
+    var totalEl = document.getElementById("drp-total"), dateEl = document.getElementById("drp-date");
+    var amountEl = document.getElementById("drp-amount"), sourceEl = document.getElementById("drp-source");
+    var noteEl = document.getElementById("drp-note"), brokerOut = document.getElementById("drp-broker");
+    var addedOut = document.getElementById("drp-added"), priceOut = document.getElementById("drp-price"), status = document.getElementById("drp-status");
+    function refreshDrpPreview(sourceChanged) {
+      if (sourceEl) {
+        Array.prototype.forEach.call(sourceEl.options, function (opt) {
+          if (!opt.value) return;
+          opt.disabled = !!dateEl.value && opt.getAttribute("data-month") !== dateEl.value.slice(0, 7);
+        });
+        var selected = sourceEl.options[sourceEl.selectedIndex];
+        if (selected && selected.disabled) { sourceEl.value = ""; amountEl.value = ""; selected = sourceEl.options[0]; }
+        if (selected && selected.value) {
+          amountEl.value = selected.getAttribute("data-amount") || ""; amountEl.readOnly = true;
+          if (sourceChanged && noteEl && !noteEl.value) noteEl.value = selected.getAttribute("data-note") || "";
+        } else amountEl.readOnly = false;
+      }
+      var total = normalizedDecimal(totalEl.value), added = decimalAdd(total, baseRaw, true), amount = num(amountEl.value);
+      brokerOut.textContent = num(total) > 0 ? displayShares(total) : "-";
+      addedOut.textContent = num(added) > 0 ? displayShares(added) : "-";
+      priceOut.textContent = num(added) > 0 && amount > 0 ? fmt(amount / num(added), h.currency) : "-";
+      if (!(num(total) > 0)) status.textContent = trUI("Enter the total shares shown by your broker");
+      else if (!(num(added) > 0)) status.textContent = trUI("The broker total must be greater than the shares currently in Valutio");
+      else if (!(amount > 0)) status.textContent = trUI("Enter the total dividend reinvested");
+      else status.textContent = trUI("This adds a linked dividend and share acquisition. Your existing transactions stay unchanged.");
+    }
+    [totalEl, dateEl, amountEl].forEach(function (el) { if (el) el.addEventListener("input", function () { refreshDrpPreview(false); }); });
+    if (sourceEl) sourceEl.addEventListener("change", function () { refreshDrpPreview(true); });
+    refreshDrpPreview(false);
+  }
+  function confirmDeleteDividendReinvestment(h, linkId) {
+    var event = findDrpEvent(h, linkId); if (!event) { toast("This reinvestment could not be found"); return; }
+    confirmDelete("Delete reinvestment?",
+      "Removes the linked share acquisition and dividend together. You can undo this right after.",
+      function () {
+        var removed = removeDividendReinvestment(h, linkId); if (!removed) return;
+        repropagateHolding(h); save(); render();
+        toastUndo("Reinvestment deleted", function () {
+          if (restoreDividendReinvestment(h, removed)) { repropagateHolding(h); save(); render(); toast("Reinvestment restored"); }
+        });
+      }, "Delete reinvestment");
+  }
+
   // Add a buy or sell transaction to a holding (the per-month entry, like the sheet)
   function transactionModal(h, type) {
     type = type === "sell" ? "sell" : "buy";
     var m = holdingMetrics(h);
     var isSell = type === "sell";
-    var today = new Date().toISOString().slice(0, 10), defaultDate = today.slice(0, 7) === state.month ? today : state.month + "-15";
+    var today = localDateString(), defaultDate = today.slice(0, 7) === state.month ? today : state.month + "-15";
     openModal({
       title: (isSell ? "Sell: " : "Buy: ") + h.name,
       sub: isSell
         ? "You currently hold " + (+m.shares.toFixed(6)) + " @ avg cost " + fmt(m.cost / (m.shares || 1), h.currency) + ". Realized P/L is computed automatically."
         : "Record a purchase. Cost = shares × price + fees is computed automatically.",
       body:
-        '<div class="row"><div class="field"><label>Trade date</label><input id="tx-date" type="date" value="' + defaultDate + '" required></div>' +
+        '<div class="row"><div class="field"><label>Trade date</label><input id="tx-date" type="date" max="' + today + '" value="' + defaultDate + '" required></div>' +
         '<div class="field"><label>' + (isSell ? "Shares to sell" : "Shares bought") + '</label><input id="tx-sh" type="number" step="any" min="0" value="' + (isSell ? (+m.shares.toFixed(6)) : "") + '" placeholder="0" required></div></div>' +
         '<div class="row"><div class="field"><label>' + (isSell ? "Sale price" : "Buy price") + " (" + esc(h.currency) + ')</label><input id="tx-pr" type="number" step="any" min="0" value="' + (m.price || "") + '" placeholder="0.00" required></div>' +
         '<div class="field"><label>Fees (' + esc(h.currency) + ')</label><input id="tx-fee" type="number" step="any" min="0" value="0"></div></div>',
@@ -6049,6 +6757,7 @@
         var shRaw = normalizedDecimal(val("tx-sh")), prRaw = normalizedDecimal(val("tx-pr")), feeRaw = normalizedDecimal(val("tx-fee"));
         var sh = num(shRaw), pr = num(prRaw), fee = num(feeRaw), date = val("tx-date");
         if (!validDateString(date)) { toast("Enter a valid trade date"); return false; }
+        if (date > today) { toast("Trade date cannot be in the future"); return false; }
         if (sh <= 0) { toast("Enter a share amount"); return false; }
         if (pr <= 0) { toast("Enter a price greater than zero"); return false; }
         if (fee < 0) { toast("Fees cannot be negative"); return false; }
@@ -6067,12 +6776,13 @@
   // this holding's per-month snapshot records (back-propagation) so historical averages stay in sync.
   function transactionEditModal(h, t) {
     if (!h || !t) return;
+    var today = localDateString();
     openModal({
       title: "Edit transaction - " + h.name,
       sub: "Correcting a buy/sell re-derives this holding's averages across every month it spans.",
       body:
         '<div class="row"><div class="field"><label>Action</label><select id="tx-type"><option value="buy"' + (t.type !== "sell" ? " selected" : "") + ">Buy</option><option value=\"sell\"" + (t.type === "sell" ? " selected" : "") + ">Sell</option></select></div>" +
-        '<div class="field"><label>Trade date</label><input id="tx-date" type="date" value="' + esc(validDateString(t.date) ? t.date : t.month + "-15") + '" required></div></div>' +
+        '<div class="field"><label>Trade date</label><input id="tx-date" type="date" max="' + today + '" value="' + esc(validDateString(t.date) ? t.date : t.month + "-15") + '" required></div></div>' +
         '<div class="row"><div class="field"><label>Shares</label><input id="tx-sh" type="number" step="any" min="0" value="' + esc(t.shares) + '" required></div>' +
         '<div class="field"><label>Price (' + esc(h.currency) + ')</label><input id="tx-pr" type="number" step="any" min="0" value="' + esc(t.price) + '" required></div></div>' +
         '<div class="field"><label>Fees (' + esc(h.currency) + ')</label><input id="tx-fee" type="number" step="any" min="0" value="' + esc(num(t.fees)) + '"></div>',
@@ -6081,6 +6791,7 @@
         var shRaw = normalizedDecimal(val("tx-sh")), prRaw = normalizedDecimal(val("tx-pr")), feeRaw = normalizedDecimal(val("tx-fee"));
         var sh = num(shRaw), pr = num(prRaw), fee = num(feeRaw), date = val("tx-date");
         if (!validDateString(date)) { toast("Enter a valid trade date"); return false; }
+        if (date > today) { toast("Trade date cannot be in the future"); return false; }
         if (sh <= 0) { toast("Enter a share amount"); return false; }
         if (pr <= 0) { toast("Enter a price greater than zero"); return false; }
         if (fee < 0) { toast("Fees cannot be negative"); return false; }
@@ -6161,6 +6872,7 @@
     var s = snapByMonth(m);
     var fr = (s && s.holdings) ? s.holdings[h.id] : null;
     var v = fr || { shares: "", buyPrice: "", fees: "", price: "", realized: "" };
+    var contributionValue = v.contributionCost == null ? num(v.shares) * num(v.buyPrice) + num(v.fees) : num(v.contributionCost);
     openModal({
       title: "Edit " + h.name + " - " + monthLabel(m),
       sub: "Frozen values for " + esc(monthLabel(m)) + ", in " + esc(h.currency) + ". These don't change with live prices.",
@@ -6171,13 +6883,16 @@
         '<div class="row"><div class="field"><label>Fees</label><input id="fh-fee" type="number" step="any" value="' + esc(v.fees) + '"></div>' +
         '<div class="field"><label>Price</label><input id="fh-pr" type="number" step="any" value="' + esc(v.price) + '"></div>' +
         '<div class="field"><label>Realized P/L</label><input id="fh-rl" type="number" step="any" value="' + esc(v.realized) + '"></div></div>' +
+        '<div class="field"><label>External contribution cost (' + esc(h.currency) + ')</label><input id="fh-cc" type="number" step="any" min="0" value="' + esc(contributionValue) + '"><p class="hint">Money added from outside the portfolio. Reinvested dividends are excluded.</p></div>' +
         '<div class="help-box" style="margin:6px 0 0">Cost = shares × avg buy + fees; Value = shares × price. Leave blank/0 if you didn\'t hold this in ' + esc(monthLabel(m)) + ".</div>",
       onSubmit: function () {
+        var contributionCost = num(val("fh-cc"));
+        if (contributionCost < 0) { toast("External contribution cost cannot be negative"); return false; }
         var snap2 = ensureSnapshot(m);
         materializeSnapshotBuckets(snap2);   // don't let the re-total wipe an aggregate-only month
         var rec = snap2.holdings[h.id] || {};
         rec.shares = num(val("fh-sh")); rec.buyPrice = num(val("fh-bp")); rec.fees = num(val("fh-fee"));
-        rec.price = num(val("fh-pr")); rec.realized = num(val("fh-rl"));
+        rec.price = num(val("fh-pr")); rec.realized = num(val("fh-rl")); rec.contributionCost = contributionCost;
         rec.type = h.type; rec.currency = h.currency;
         // Re-anchor the locked rate to the CURRENT currency's frozen rate (a since-changed holding currency
         // must not keep the old currency's rate). Fall back to the live rate, then any existing rate.
@@ -6378,47 +7093,61 @@
         '<button type="button" class="btn sm" data-act="add-adjustment">+ Add adjustment</button>',
       submitLabel: "Save Tax Settings",
       onSubmit: function () {
-        var prevCur = t.currency;
-        t.currency = val("t-cur"); t.taxFreeThreshold = num(val("t-thr"));
-        if (t.taxFreeThreshold < 0) { toast("Tax-free threshold cannot be negative"); return false; }
-        // Tax currency changed: any invoice's locked fxRate targeted the OLD tax currency, so it's now
-        // wrong. Drop it (and the dated flag) so invoiceInTax re-derives the conversion at current FX.
-        if (t.currency !== prevCur) (t.invoices || []).forEach(function (iv) { if (iv.currency !== t.currency) { delete iv.fxRate; delete iv.fxDate; } });
-        t.employmentIncome = num(val("t-emp")); t.employmentTaxPaid = num(val("t-paid"));
-        t.otherIncome = num(val("t-other")); t.deductions = num(val("t-ded")); t.capitalLossCarryIn = num(val("t-loss-carry"));
-        if (t.capitalLossCarryIn < 0) { toast("Capital losses carried in cannot be negative"); return false; }
-        var levyPct = num(val("t-levy")), cgtPct = num(val("t-cgt")), discPct = num(val("t-cgtdisc"));
-        if (levyPct < 0 || levyPct > 100 || cgtPct < 0 || cgtPct > 100 || discPct < 0 || discPct > 100) { toast("Tax rates and CGT values must be between 0% and 100%"); return false; }
-        t.levyLabel = val("t-llabel"); t.levyRate = levyPct / 100;
-        t.capitalGainsRate = cgtPct / 100;
-        t.capitalGainsDiscount = discPct / 100;
-        t.capitalGainsDiscountMonths = num(val("t-cgtmonths"));
+        function taxField(id, label, opts) {
+          var result = validatedInputNumber(id, label, Object.assign({ blankIsZero: true }, opts || {}));
+          return result.ok ? result.value : null;
+        }
+        var threshold = taxField("t-thr", "tax-free threshold", { min: 0 }); if (threshold == null) return false;
+        var employment = taxField("t-emp", "employment income", { min: 0 }); if (employment == null) return false;
+        var paid = taxField("t-paid", "tax already paid", { min: 0 }); if (paid == null) return false;
+        var other = taxField("t-other", "other income", { min: 0 }); if (other == null) return false;
+        var deductions = taxField("t-ded", "deductions", { min: 0 }); if (deductions == null) return false;
+        var carry = taxField("t-loss-carry", "capital losses carried in", { min: 0 }); if (carry == null) return false;
+        var levyPct = taxField("t-levy", "levy rate", { min: 0, max: 100 }); if (levyPct == null) return false;
+        var cgtPct = taxField("t-cgt", "capital gains rate", { min: 0, max: 100 }); if (cgtPct == null) return false;
+        var discPct = taxField("t-cgtdisc", "capital gains discount", { min: 0, max: 100 }); if (discPct == null) return false;
+        var holdingMonths = taxField("t-cgtmonths", "discount holding period", { min: 0, integer: true }); if (holdingMonths == null) return false;
+        var candidate = JSON.parse(JSON.stringify(t));
+        candidate.currency = val("t-cur"); candidate.taxFreeThreshold = threshold;
+        candidate.employmentIncome = employment; candidate.employmentTaxPaid = paid;
+        candidate.otherIncome = other; candidate.deductions = deductions; candidate.capitalLossCarryIn = carry;
+        candidate.levyLabel = val("t-llabel"); candidate.levyRate = levyPct / 100;
+        candidate.capitalGainsRate = cgtPct / 100; candidate.capitalGainsDiscount = discPct / 100;
+        candidate.capitalGainsDiscountMonths = holdingMonths;
         var bkList = document.getElementById("bk-list");
         var uptos = bkList.querySelectorAll(".bk-upto"), rates = bkList.querySelectorAll(".bk-rate");
         var brackets = [];
         for (var i = 0; i < uptos.length; i++) {
           var up = uptos[i].value.trim();
-          var cap = up === "" ? null : num(up), ratePct = num(rates[i].value);
-          if ((cap != null && cap < 0) || ratePct < 0 || ratePct > 100) { toast("Tax bracket rates must be between 0% and 100%"); return false; }
+          var cap = up === "" ? null : decimalNumber(up), ratePct = decimalNumber(rates[i].value.trim() === "" ? "0" : rates[i].value);
+          if ((up !== "" && cap == null) || (cap != null && cap < 0) || ratePct == null || ratePct < 0 || ratePct > 100) { toast("Enter valid tax bracket caps and rates between 0% and 100%"); return false; }
           brackets.push({ upTo: cap, rate: ratePct / 100 });
         }
         // Sort ascending by cap (null = top/∞ last) so a user who enters brackets out of order still gets a
         // valid progressive chain - progressiveTax assumes non-decreasing caps.
         if (brackets.length) {
           brackets.sort(function (a, b) { return (a.upTo == null ? Infinity : num(a.upTo)) - (b.upTo == null ? Infinity : num(b.upTo)); });
-          var topCount = brackets.filter(function (b) { return b.upTo == null; }).length, prevCap = num(t.taxFreeThreshold), invalidOrder = false;
+          var topCount = brackets.filter(function (b) { return b.upTo == null; }).length, prevCap = threshold, invalidOrder = false;
           brackets.forEach(function (b, i) { if (b.upTo == null) { if (i !== brackets.length - 1) invalidOrder = true; } else { if (!(num(b.upTo) > prevCap)) invalidOrder = true; prevCap = num(b.upTo); } });
           if (topCount !== 1 || invalidOrder) { toast("Use increasing bracket caps above the tax-free threshold and one open-ended top bracket"); return false; }
-          t.brackets = brackets;
+          candidate.brackets = brackets;
         } else { toast("Add at least one tax bracket"); return false; }
         var an = document.querySelectorAll(".adj-name"), at = document.querySelectorAll(".adj-type"),
           am = document.querySelectorAll(".adj-mode"), av = document.querySelectorAll(".adj-value");
         var adjs = [];
         for (var k = 0; k < an.length; k++) {
           var nm = an[k].value.trim(); if (!nm) continue;
-          adjs.push({ id: uid(), name: nm, type: at[k].value, mode: am[k].value, value: num(av[k].value) });
+          var adjustmentValue = decimalNumber(av[k].value.trim() === "" ? "0" : av[k].value);
+          if (adjustmentValue == null || adjustmentValue < 0) { toast("Tax adjustment values must be zero or higher"); return false; }
+          adjs.push({ id: uid(), name: nm, type: at[k].value, mode: am[k].value, value: adjustmentValue });
         }
-        t.adjustments = adjs;
+        candidate.adjustments = adjs;
+        // Annual amounts (income, tax paid, deductions) are user data, not rate customization. Keep the
+        // year-aware preset marker when every threshold/bracket/levy/CGT field still matches the preset so
+        // next year's legislated rates can roll forward automatically.
+        markTaxPresetManagement(candidate);
+        var applied = applyTaxSettingsCandidate(t, candidate);
+        if (!applied.ok) { toast(applied.errors[0]); return false; }
         save(); render(); toast("Tax settings saved");
       },
     });
@@ -6435,7 +7164,7 @@
     openModal({
       title: existing ? "Edit Currency" : "Add Currency",
       cls: "currency-modal",
-      noAutoFocus: !existing,
+      initialFocus: existing ? "#c-code" : "#c-preset",
       body:
         quickPick +
         '<div class="row"><div class="field"><label>Code</label><input id="c-code" value="' + esc(c.code) + '" placeholder="USD" maxlength="4"' + (existing ? " readonly" : "") + " required></div>" +
@@ -6490,6 +7219,7 @@
         perHolding[h.id] = {
           shares: hm.shares, buyPrice: hm.avgBuyPrice,
           fees: hm.cost - hm.shares * hm.avgBuyPrice,   // so cost reconstructs exactly
+          contributionCost: hm.contributionCost,
           price: hm.price, realized: hm.realized, type: h.type, currency: h.currency, rate: rate,
           mvBase: hm.marketValueBase, costBase: hm.costBase,
         };
@@ -6505,7 +7235,7 @@
       return {
         month: m, date: new Date().toISOString(),
         netWorth: gross - debtsTotal, gross: gross,
-        invest: pf.mv, cost: pf.cost, unrealized: pf.unreal, realized: pf.real,
+        invest: pf.mv, cost: pf.cost, contributionCost: pf.contributionCost, unrealized: pf.unreal, realized: pf.real,
         buckets: netWorthBuckets(), holdings: perHolding, accounts: perAccount,
         debts: perDebt, debtsTotal: debtsTotal,   // frozen liabilities (immutable once the month closes)
         physAssets: physicalAssetsTotal(),   // frozen physical-asset value (feeds historical net worth)
@@ -6608,8 +7338,23 @@
       d.lastClose = m;
     });
   }
+  function taxRecordHasData(t) {
+    return !!(t && ((t.invoices || []).length || (t.adjustments || []).length || num(t.employmentIncome) ||
+      num(t.employmentTaxPaid) || num(t.otherIncome) || num(t.deductions) || num(t.capitalLossCarryIn) || num(t.capitalLossCarryOut)));
+  }
+  // One shared data-presence rule for snapshots and backup reminders. A wallet may contain valuable data
+  // without a bank account or holding (for example a home and mortgage, goals, recurring plans, retirement
+  // inputs, or a tax ledger), and those users need the same history and backup protection.
+  function walletHasData() {
+    if ((db.accounts || []).length || (db.holdings || []).length || (db.physicalAssets || []).length ||
+      (db.debts || []).length || (db.expenses || []).length || (db.incomes || []).length ||
+      (db.goals || []).length || (db.recurring || []).length || (db.snapshots || []).length ||
+      (db.taxArchive || []).length || taxRecordHasData(db.tax)) return true;
+    var r = db.retirement || {};
+    return !!(num(r.salary) || num(r.employerExtra) || num(r.voluntary));
+  }
   function maybeAutoSnapshot() {
-    if (!db.accounts.length && !db.holdings.length) return false; // nothing to record yet
+    if (!walletHasData()) return false; // nothing meaningful to record yet
     var today = new Date(), cm = currentMonth(), did = null;
     var prev = prevMonthStr(cm);
     // Only backfill months the wallet was already active for - never fabricate history before setup.
@@ -6687,15 +7432,15 @@
       // Append the live current month (same figures History shows) unless it's already frozen.
       if (!snaps.some(function (s) { return s.month === cm; })) {
         var lp = portfolioTotals();
-        snaps.push({ month: cm, netWorth: netWorthAfterDebts(), gross: grossNetWorth(), invest: lp.mv, cost: lp.cost,
+        snaps.push({ month: cm, netWorth: netWorthAfterDebts(), gross: grossNetWorth(), invest: lp.mv, cost: lp.cost, contributionCost: lp.contributionCost,
           unrealized: lp.unreal, realized: totalRealizedAllTime(), income: monthTotal(db.incomes, cm), expenses: monthTotal(db.expenses, cm), debtsTotal: debtsTotalBase() });
       }
       if (!snaps.length) { toast("No history to export"); return; }
       var rows2 = [["Month", "Net Worth (" + b + ")", "Gross Assets (" + b + ")", "Debts (" + b + ")", "Investments (" + b + ")",
-        "Invested Cost (" + b + ")", "Unrealized P/L (" + b + ")", "Realized P/L cumulative (" + b + ")", "Income (" + b + ")", "Expenses (" + b + ")", "Saved (" + b + ")"]];
+        "Invested Cost (" + b + ")", "External Contribution Cost (" + b + ")", "Unrealized P/L (" + b + ")", "Realized P/L cumulative (" + b + ")", "Income (" + b + ")", "Expenses (" + b + ")", "Saved (" + b + ")"]];
       snaps.forEach(function (s) {
         rows2.push([s.month, n2(s.netWorth), n2(s.gross != null ? s.gross : s.netWorth), n2(s.debtsTotal), n2(s.invest),
-          n2(s.cost), n2(s.unrealized), n2(s.realized), n2(s.income), n2(s.expenses), n2(num(s.income) - num(s.expenses))]);
+          n2(s.cost), n2(s.contributionCost == null ? s.cost : s.contributionCost), n2(s.unrealized), n2(s.realized), n2(s.income), n2(s.expenses), n2(num(s.income) - num(s.expenses))]);
       });
       downloadCSV("valutio-history", rows2);
       return;
@@ -6754,21 +7499,21 @@
       sheet("Accounts", [["Name", "Bucket", "Balance", "Currency", "Joint", "Share %", "Co-owner"]].concat((db.accounts || []).map(function (a) {
         return [a.name || "", a.bucket || "", n2(a.balance), a.currency || b, isJoint(a) ? "Yes" : "", isJoint(a) ? num(a.share) : "", a.coOwner || ""];
       })), [26, 18, 14, 12, 10, 10, 18]);
-      sheet("Finance", [["Date", "Asset", "Ticker", "Type", "Action", "Shares", "Price", "Total Cost", "Fees", "Currency", "Note"]].concat((db.holdings || []).flatMap(function (h) {
+      sheet("Finance", [["Date", "Asset", "Ticker", "Type", "Action", "Shares", "Price", "Total Cost", "Fees", "Currency", "Note", "Origin", "Link ID"]].concat((db.holdings || []).flatMap(function (h) {
         return (h.transactions || []).map(function (t) {
           var fees = num(t.fees);
           var gross = num(t.shares) * num(t.price);
           return [validDateString(t.date) ? t.date : dateFromMonth(t.month), h.name || "", h.ticker || "", typeMeta(h.type).label, t.type === "sell" ? "Sell" : "Buy",
-            num(t.shares), n2(t.price), n2(gross + fees), n2(fees), h.currency || b, t.note || ""];
+            num(t.shares), n2(t.price), n2(gross + fees), n2(fees), h.currency || b, t.note || "", t.origin || "", t.linkId || ""];
         });
-      })), [13, 28, 14, 14, 10, 12, 14, 14, 10, 12, 24]);
+      })), [13, 28, 14, 14, 10, 12, 14, 14, 10, 12, 24, 12, 24]);
       sheet("Holdings", [["Name", "Ticker", "Type", "Currency", "Shares", "Avg Buy Price", "Current Price", "Cost (" + b + ")", "Market Value (" + b + ")", "Unrealized P/L (" + b + ")", "Realized P/L (" + b + ")"]].concat((db.holdings || []).map(function (h) {
         var m = holdingMetrics(h);
         return [h.name || "", h.ticker || "", typeMeta(h.type).label, h.currency || b, +m.shares.toFixed(6), n2(m.avgBuyPrice), n2(m.price), n2(m.costBase), n2(m.marketValueBase), n2(m.unrealizedBase), n2(m.realizedBase)];
       })), [28, 14, 14, 12, 12, 16, 16, 16, 18, 18, 18]);
-      sheet("Dividends", [["Date", "Asset", "Ticker", "Amount", "Currency", "Note"]].concat((db.holdings || []).flatMap(function (h) {
-        return (h.dividends || []).map(function (d) { return [dateFromMonth(d.month), h.name || "", h.ticker || "", n2(d.amount), h.currency || b, d.note || ""]; });
-      })), [13, 28, 14, 14, 12, 24]);
+      sheet("Dividends", [["Date", "Asset", "Ticker", "Amount", "Currency", "Note", "Origin", "Link ID"]].concat((db.holdings || []).flatMap(function (h) {
+        return (h.dividends || []).map(function (d) { return [validDateString(d.date) ? d.date : dateFromMonth(d.month), h.name || "", h.ticker || "", n2(d.amount), h.currency || b, d.note || "", d.origin || "", d.linkId || ""]; });
+      })), [13, 28, 14, 14, 12, 24, 12, 24]);
       sheet("Incomes", [["Date", "Category", "Amount", "Currency", "Note", "Joint Share %", "Recurring"]].concat((db.incomes || []).map(function (x) {
         return [dateFromMonth(x.month), x.category || "", n2(x.amount), x.currency || b, x.note || "", isJoint(x) ? num(x.share) : "", x.recurringId ? "Yes" : ""];
       })), [13, 20, 14, 12, 28, 12, 10]);
@@ -6792,9 +7537,9 @@
         ["Voluntary Contribution", n2(rt.voluntary)],
       ], [28, 16]);
       var snaps = (db.snapshots || []).slice().sort(function (a, z) { return a.month < z.month ? -1 : 1; });
-      sheet("History", [["Month", "Net Worth (" + b + ")", "Gross Assets (" + b + ")", "Debts (" + b + ")", "Investments (" + b + ")", "Cost (" + b + ")", "Unrealized P/L (" + b + ")", "Realized P/L (" + b + ")", "Income (" + b + ")", "Expenses (" + b + ")"]].concat(snaps.map(function (s) {
-        return [s.month, n2(s.netWorth), n2(s.gross != null ? s.gross : s.netWorth), n2(s.debtsTotal), n2(s.invest), n2(s.cost), n2(s.unrealized), n2(s.realized), n2(s.income), n2(s.expenses)];
-      })), [12, 18, 18, 16, 18, 16, 18, 18, 16, 16]);
+      sheet("History", [["Month", "Net Worth (" + b + ")", "Gross Assets (" + b + ")", "Debts (" + b + ")", "Investments (" + b + ")", "Cost (" + b + ")", "External Contribution Cost (" + b + ")", "Unrealized P/L (" + b + ")", "Realized P/L (" + b + ")", "Income (" + b + ")", "Expenses (" + b + ")"]].concat(snaps.map(function (s) {
+        return [s.month, n2(s.netWorth), n2(s.gross != null ? s.gross : s.netWorth), n2(s.debtsTotal), n2(s.invest), n2(s.cost), n2(s.contributionCost == null ? s.cost : s.contributionCost), n2(s.unrealized), n2(s.realized), n2(s.income), n2(s.expenses)];
+      })), [12, 18, 18, 16, 18, 16, 24, 18, 18, 16, 16]);
       var out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
       var blob = new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       var url = URL.createObjectURL(blob);
@@ -6861,7 +7606,7 @@
   function backupDue() {
     var fr = db.settings.autoBackup;
     if (fr === "off" || !db.setupComplete) return false;
-    if (!(db.accounts.length || db.holdings.length || db.expenses.length || db.incomes.length)) return false;
+    if (!walletHasData()) return false;
     var span = fr === "weekly" ? 7 * DAY : 30 * DAY;
     return Date.now() - (db.meta.lastBackup || 0) >= span;
   }
@@ -6928,7 +7673,7 @@
   }
   function backupOverdue() {
     if (!db.setupComplete) return false;
-    if (!(db.accounts.length || db.holdings.length || db.expenses.length || db.incomes.length)) return false;
+    if (!walletHasData()) return false;
     var now = Date.now();
     if (now < (db.meta.backupSnooze || 0)) return false;
     return now - (db.meta.lastBackup || 0) > 14 * DAY;
@@ -7345,6 +8090,9 @@
       (h.transactions || []).forEach(function (t, ti) {
         if (t.date != null && t.date !== "" && !validDateString(t.date)) errors.push((h.name || h.ticker || "Holding " + (hi + 1)) + " transaction " + (ti + 1) + " has an invalid date.");
       });
+      (h.dividends || []).forEach(function (dv, di) {
+        if (dv.date != null && dv.date !== "" && !validDateString(dv.date)) errors.push((h.name || h.ticker || "Holding " + (hi + 1)) + " dividend " + (di + 1) + " has an invalid date.");
+      });
     });
     [d.tax].concat(d.taxArchive || []).forEach(function (tax, yi) {
       if (!tax) return;
@@ -7354,12 +8102,43 @@
     });
     return errors;
   }
+  function strictBackupLedgerErrors(d) {
+    var errors = [], today = localDateString();
+    (d.holdings || []).forEach(function (h, hi) {
+      var label = h.name || h.ticker || "Holding " + (hi + 1);
+      (h.transactions || []).forEach(function (t, ti) {
+        var rowLabel = label + " transaction " + (ti + 1);
+        if (!validMonthString(t.month)) errors.push(rowLabel + " has an invalid month.");
+        if (t.type !== "buy" && t.type !== "sell") errors.push(rowLabel + " type must be buy or sell.");
+        if (validDateString(t.date)) {
+          if (t.date.slice(0, 7) !== t.month) errors.push(rowLabel + " date and month disagree.");
+          if (t.date > today) errors.push(rowLabel + " is dated in the future.");
+        }
+        if (!(decimalNumber(t.shares) > 0)) errors.push(rowLabel + " shares must be greater than zero.");
+        if (!(decimalNumber(t.price) > 0)) errors.push(rowLabel + " price must be greater than zero.");
+        if (t.fees != null && t.fees !== "") {
+          var fees = decimalNumber(t.fees);
+          if (fees == null) errors.push(rowLabel + " fees must be a valid finite number.");
+          else if (fees < 0) errors.push(rowLabel + " fees cannot be negative.");
+        }
+      });
+      (h.dividends || []).forEach(function (dividend, di) {
+        var rowLabel = label + " dividend " + (di + 1);
+        if (!validMonthString(dividend.month)) errors.push(rowLabel + " has an invalid month.");
+        if (validDateString(dividend.date) && dividend.date.slice(0, 7) !== dividend.month) errors.push(rowLabel + " date and month disagree.");
+      });
+    });
+    return errors;
+  }
+  function strictBackupPreflightErrors(d) {
+    return strictBackupDateErrors(d).concat(strictBackupLedgerErrors(d), drpPairValidationErrors(d));
+  }
   function applyImportedJSON(raw) {
     try {
       var parsed = JSON.parse(raw);
       if (!parsed.settings || !parsed.currencies) throw new Error("bad");
-      var dateErrors = strictBackupDateErrors(parsed);
-      if (dateErrors.length) { validationReport("JSON import needs attention", { errors: dateErrors, warnings: [] }); return; }
+      var preflightErrors = strictBackupPreflightErrors(parsed);
+      if (preflightErrors.length) { validationReport("JSON import needs attention", { errors: preflightErrors, warnings: [] }); return; }
       var missing = missingBackupCurrencies(parsed);
       if (missing.length) { toast("Backup is missing FX records for: " + missing.join(", ") + ". Add them to the backup or restore a complete JSON export."); return; }
       var audit = validateDb(migrate(parsed), { repair: true, strict: true, source: "json-import" });
@@ -7431,6 +8210,27 @@
     }); }
     return loadScript(XLSX_LOCAL).catch(function () { return loadScript(XLSX_CDN); });
   }
+  function workbookContainsDrpRows(XLSX, wb) {
+    return (wb.SheetNames || []).some(function (name) {
+      var ws = wb.Sheets[name]; if (!ws || !ws["!ref"]) return false;
+      var rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+      var originCol = -1, linkCol = -1, header = -1;
+      for (var r = 0; r < Math.min(rows.length, 40); r++) {
+        (rows[r] || []).forEach(function (cell, i) {
+          var key = typeof cell === "string" ? cell.trim().toLowerCase() : "";
+          if (key === "origin") originCol = i;
+          if (key === "link id" || key === "linkid") linkCol = i;
+        });
+        if (originCol >= 0 || linkCol >= 0) { header = r; break; }
+      }
+      if (header < 0) return false;
+      return rows.slice(header + 1).some(function (row) {
+        var origin = originCol >= 0 ? String((row || [])[originCol] || "").trim().toLowerCase() : "";
+        var link = linkCol >= 0 ? String((row || [])[linkCol] || "").trim() : "";
+        return origin === "drp" || !!link;
+      });
+    });
+  }
   // Pre-import guidance: a warning + a scannable mini-tutorial of the keyword mappings the parser
   // looks for, so the user can audit their layout. "Proceed" opens the real file picker; "Cancel"
   // leaves all current app state untouched.
@@ -7453,6 +8253,11 @@
   // Universal Excel import: a standard file picker (works in sandboxed browser / installed PWA),
   // no hardcoded paths. The chosen .xlsx/.xls workbook is read in-browser and ingested unchanged
   // through the existing dynamic column search, float parsing, snapshot sync and validation summary.
+  function withDbRollback(work) {
+    var backup = JSON.parse(JSON.stringify(db));
+    try { return work(); }
+    finally { db = backup; }
+  }
   function runExcelImport() {
     var input = document.createElement("input");
     input.type = "file"; input.accept = ".xlsx,.xls";
@@ -7466,15 +8271,25 @@
             // cellNF preserves each cell's number-format string (.z) so the currency sniffer can read
             // the format mask when a row has no explicit currency column.
             var wb = XLSX.read(new Uint8Array(reader.result), { type: "array", cellNF: true });
+            if (workbookContainsDrpRows(XLSX, wb)) {
+              openModal({
+                title: "Use JSON to restore dividend reinvestments",
+                sub: "This workbook contains linked DRP records that the spreadsheet importer cannot restore safely.",
+                body: '<div class="callout import-warn">' + icon("shield") + '<div><strong>Import blocked to prevent an incomplete investment history.</strong> Restore the matching Valutio JSON backup instead; it preserves the linked dividend, share acquisition, exact dates and decimal values together.</div></div>',
+                submitLabel: "Close",
+              });
+              return;
+            }
             // DRY-RUN: ingest into the live db, snapshot the result, then ROLL BACK so nothing is
             // committed until the user reviews the parse summary and clicks Apply. Cancelling/closing
             // the preview leaves the existing data completely untouched.
-            var backup = JSON.parse(JSON.stringify(db));
-            var res = ingestExcelWorkbook(XLSX, wb);
-            var imported = JSON.parse(JSON.stringify(db));
-            var audit = validateDb(imported, { repair: true, strict: true, source: "excel-import" });
-            imported = audit.db;
-            db = backup;   // restore immediately; Apply re-commits `imported`
+            var preview = withDbRollback(function () {
+              var res = ingestExcelWorkbook(XLSX, wb);
+              var imported = JSON.parse(JSON.stringify(db));
+              var audit = validateDb(imported, { repair: true, strict: true, source: "excel-import" });
+              return { res: res, imported: audit.db, audit: audit };
+            });
+            var res = preview.res, imported = preview.imported, audit = preview.audit;
             var curList = (imported.currencies || []).map(function (c) { return c.code; }).join(", ") || "-";
             var fb = (res.tickers && res.tickers.fallback) || [];
             var parsedAnything = (res.holdings + res.accounts + res.income + res.expense + (res.invoices || 0) + (res.retirement || 0)) > 0;
@@ -8241,17 +9056,21 @@
   // shares held, weighted-average cost basis and realized P/L up to that point.
   function positionAt(h, cutoff) {
     var txns = sortedTxns(h);
-    var shares = 0, cost = 0, realized = 0;
+    var shares = 0, cost = 0, contributionCost = 0, realized = 0;
     txns.forEach(function (t) {
       if (String(t.month) > cutoff) return;
       var sh = num(t.shares), pr = num(t.price), fee = num(t.fees);
       if (t.type === "sell") {
-        var avg = shares > 0 ? cost / shares : 0, s = Math.min(sh, shares);
-        realized += s * (pr - avg) - fee; cost -= avg * s; shares -= s;
-        if (shares < 1e-9) { shares = 0; cost = 0; }
-      } else { shares += sh; cost += sh * pr + fee; }
+        var avg = shares > 0 ? cost / shares : 0, contributionAvg = shares > 0 ? contributionCost / shares : 0, s = Math.min(sh, shares);
+        realized += s * (pr - avg) - fee; cost -= avg * s; contributionCost -= contributionAvg * s; shares -= s;
+        if (shares < 1e-9) { shares = 0; cost = 0; contributionCost = 0; }
+      } else {
+        var c = sh * pr + fee;
+        shares += sh; cost += c;
+        if (t.origin !== "drp") contributionCost += c;
+      }
     });
-    return { shares: shares, costBasis: cost, avgBuyPrice: shares > 0 ? cost / shares : 0, realized: realized };
+    return { shares: shares, costBasis: cost, contributionCost: contributionCost, avgBuyPrice: shares > 0 ? cost / shares : 0, realized: realized };
   }
   // Timeline parity + per-holding hydration: synthesize a monthly snapshot for every period of the
   // year sheets. Each snapshot carries its per-account buckets AND a per-holding map (keyed by the
@@ -8339,7 +9158,7 @@
     });
     var cm = currentMonth();
     return Object.keys(bins).sort().map(function (m) {
-      var b = bins[m], snapHoldings = {}, invest = 0, cost = 0, unreal = 0, real = 0, bkStock = 0, bkCrypto = 0;
+      var b = bins[m], snapHoldings = {}, invest = 0, cost = 0, contributionCost = 0, unreal = 0, real = 0, bkStock = 0, bkCrypto = 0;
       var bkCash = 0, bkSav = 0, bkPen = 0, accountsOut = {};
       Object.keys(b.accounts).forEach(function (id) {
         var ac = b.accounts[id]; accountsOut[id] = ac; var ab = num(ac.balanceBase);
@@ -8349,14 +9168,14 @@
         var h = byIdH[id]; if (!h) return;
         var value = b.holdVal[id], pos = positionAt(h, m), rate = (curByCode(h.currency) || {}).rate || 1, fr;
         if (pos.shares > 1e-9) {
-          fr = { shares: pos.shares, buyPrice: pos.avgBuyPrice, fees: 0, price: value > 0 ? value / pos.shares : pos.avgBuyPrice, realized: pos.realized, type: h.type, currency: h.currency, rate: rate };
+          fr = { shares: pos.shares, buyPrice: pos.avgBuyPrice, fees: 0, contributionCost: pos.contributionCost, price: value > 0 ? value / pos.shares : pos.avgBuyPrice, realized: pos.realized, type: h.type, currency: h.currency, rate: rate };
         } else if ((h.transactions || []).length) {
           // Ledger-backed holding with no position at month m: per the transaction log it wasn't held
           // yet (or was fully exited). Ignore the year-sheet value - it predates the first acquisition
           // and would otherwise fabricate a cost/value that doesn't reconcile with buys minus sells.
           return;
         } else {   // value-only holding (no transaction ledger at all): list it at its sheet value
-          fr = { shares: 1, buyPrice: value, fees: 0, price: value, realized: 0, type: h.type, currency: h.currency, rate: rate };
+          fr = { shares: 1, buyPrice: value, fees: 0, contributionCost: value, price: value, realized: 0, type: h.type, currency: h.currency, rate: rate };
         }
         var fm = frozenHoldingMetrics(fr);
         // Persist the base-currency market value + cost on the frozen record so the holding's
@@ -8364,15 +9183,15 @@
         // EVERY backfilled month, not just the live current month.
         fr.mvBase = fm.marketValueBase; fr.costBase = fm.costBase;
         snapHoldings[id] = fr;
-        invest += fm.marketValueBase; cost += fm.costBase; unreal += fm.unrealizedBase; real += fm.realizedBase;
+        invest += fm.marketValueBase; cost += fm.costBase; contributionCost += fm.contributionCostBase; unreal += fm.unrealizedBase; real += fm.realizedBase;
         if (h.type === "crypto") bkCrypto += fm.marketValueBase; else bkStock += fm.marketValueBase;
       });
       var umBase = 0; Object.keys(b.unmatched).forEach(function (ccy) { umBase += toBase(b.unmatched[ccy], ccy); });
-      invest += umBase; cost += umBase; bkStock += umBase;
+      invest += umBase; cost += umBase; contributionCost += umBase; bkStock += umBase;
       var nw = bkCash + bkSav + bkPen + invest;
       return {
         month: m, date: new Date().toISOString(), netWorth: nw, gross: nw,
-        invest: invest, cost: cost, unrealized: unreal, realized: real,
+        invest: invest, cost: cost, contributionCost: contributionCost, unrealized: unreal, realized: real,
         buckets: { Cash: bkCash, Savings: bkSav, Pension: bkPen, Investments: bkStock, Crypto: bkCrypto },
         holdings: snapHoldings, accounts: accountsOut, unmatched: b.unmatched, physAssets: 0,
         expenses: monthTotal(db.expenses, m), income: monthTotal(db.incomes, m),
@@ -8403,6 +9222,7 @@
     openModal({
       title: "Reset everything?",
       sub: "This permanently deletes all accounts, holdings, expenses, income, tax data and snapshots from this browser. Export a backup first if unsure.",
+      danger: true,
       submitLabel: "Delete all data",
       onSubmit: function () {
         db = defaultDB();
@@ -8553,10 +9373,12 @@
     });
   });
   function render() {
-    var app = document.getElementById("app");
-    captureSettingsNavScroll();
-    applyThemeChrome();
-    if (!db.setupComplete || state.previewWizard) {
+    renderCalcCache = { sorted: new WeakMap(), ledgers: new WeakMap(), metrics: new WeakMap() };
+    try {
+      var app = document.getElementById("app");
+      captureSettingsNavScroll();
+      applyThemeChrome();
+      if (!db.setupComplete || state.previewWizard) {
       // Setup opens from the top on first paint, but re-renders triggered by toggling
       // category tags / country keep the scroll position locked (no jump-to-top).
       var sy = window.scrollY;
@@ -8564,8 +9386,8 @@
       app.innerHTML = wizardPage();
       applyLanguageUI(app);
       if (state.wizardSeen) window.scrollTo(0, sy); else { window.scrollTo(0, 0); state.wizardSeen = true; }
-      return;
-    }
+        return;
+      }
     // privacy toggle: blur monetary values app-wide (see the eye button in pageHead). The class drives the
     // CSS blur; values stay in the DOM (layout unchanged) but are unreadable until toggled back.
     app.className = db.settings.hideValues ? "values-hidden" : "";
@@ -8581,7 +9403,10 @@
     applyLanguageUI(document);
     revealActiveMobileNav();
     restoreSettingsNavScroll();
-    if (viewChanged) window.scrollTo(0, 0);
+      if (viewChanged) window.scrollTo(0, 0);
+    } finally {
+      renderCalcCache = null;
+    }
   }
 
   function preserveCashflowColorScroll(fromEl) {
@@ -8680,10 +9505,10 @@
         save(); render(); break;
       }
       case "set-netview":
-        // "My share / Household" lens. Re-lens every frozen snapshot too so History + the net-worth trend
-        // stay consistent with the toggle (boot recompute resets to "my share" on next load).
+        // "My share / Household" is a render-time lens. snapshotForView projects closed months without
+        // mutating or persisting their frozen canonical values.
         state.netView = el.getAttribute("data-view") === "household" ? "household" : "mine";
-        recomputeAllSnapshots(); save(); render(); break;
+        render(); break;
       case "help-support": {
         // Settings is a section-sidebar layout; only the active section's panel is in the DOM. Select the
         // Help & Onboarding section before rendering, or its panel (and the scroll/flash target) won't
@@ -8736,10 +9561,11 @@
       case "edit-account": accountModal(findAccount(id)); break;
       case "del-account": {
         var dacc = findAccount(id);
+        var daccIdx = db.accounts.indexOf(dacc);
         confirmDelete("Delete " + (dacc ? dacc.name : "account") + "?",
           "Removes the account from your net worth. You can undo this right after.",
           function () { db.accounts = db.accounts.filter(function (a) { return a.id !== id; }); recomputeAllSnapshots(); save(); render();
-            toastUndo("Account deleted", function () { if (dacc) db.accounts.push(dacc); recomputeAllSnapshots(); save(); render(); }); });
+            toastUndo("Account deleted", function () { if (dacc) db.accounts.splice(Math.max(0, Math.min(daccIdx, db.accounts.length)), 0, dacc); recomputeAllSnapshots(); save(); render(); }); });
         break;
       }
 
@@ -8748,10 +9574,11 @@
       case "add-contribution": contributionModal((db.goals || []).filter(function (g) { return g.id === id; })[0]); break;
       case "del-goal": {
         var dgoal = (db.goals || []).filter(function (g) { return g.id === id; })[0];
+        var dgoalIdx = (db.goals || []).indexOf(dgoal);
         confirmDelete("Delete " + (dgoal ? dgoal.name : "goal") + "?",
           "Removes the goal and its saved progress. You can undo this right after.",
           function () { db.goals = (db.goals || []).filter(function (g) { return g.id !== id; }); save(); render();
-            toastUndo("Goal deleted", function () { if (dgoal) db.goals.push(dgoal); save(); render(); }); });
+            toastUndo("Goal deleted", function () { if (dgoal) db.goals.splice(Math.max(0, Math.min(dgoalIdx, db.goals.length)), 0, dgoal); save(); render(); }); });
         break;
       }
 
@@ -8759,10 +9586,11 @@
       case "edit-asset": assetModal((db.physicalAssets || []).filter(function (a) { return a.id === id; })[0]); break;
       case "del-asset": {
         var dasset = (db.physicalAssets || []).filter(function (a) { return a.id === id; })[0];
+        var dassetIdx = (db.physicalAssets || []).indexOf(dasset);
         confirmDelete("Delete " + (dasset ? dasset.name : "asset") + "?",
           "Removes the asset from your net worth. You can undo this right after.",
           function () { db.physicalAssets = (db.physicalAssets || []).filter(function (a) { return a.id !== id; }); recomputeAllSnapshots(); save(); render();
-            toastUndo("Asset deleted", function () { if (dasset) db.physicalAssets.push(dasset); recomputeAllSnapshots(); save(); render(); }); });
+            toastUndo("Asset deleted", function () { if (dasset) db.physicalAssets.splice(Math.max(0, Math.min(dassetIdx, db.physicalAssets.length)), 0, dasset); recomputeAllSnapshots(); save(); render(); }); });
         break;
       }
 
@@ -8770,10 +9598,11 @@
       case "edit-debt": debtModal((db.debts || []).filter(function (a) { return a.id === id; })[0]); break;
       case "del-debt": {
         var ddebt = (db.debts || []).filter(function (a) { return a.id === id; })[0];
+        var ddebtIdx = (db.debts || []).indexOf(ddebt);
         confirmDelete("Delete " + (ddebt ? ddebt.name : "debt") + "?",
           "Removes the debt from your net worth. You can undo this right after.",
           function () { db.debts = (db.debts || []).filter(function (a) { return a.id !== id; }); recomputeAllSnapshots(); save(); render();
-            toastUndo("Debt deleted", function () { if (ddebt) db.debts.push(ddebt); recomputeAllSnapshots(); save(); render(); }); });
+            toastUndo("Debt deleted", function () { if (ddebt) db.debts.splice(Math.max(0, Math.min(ddebtIdx, db.debts.length)), 0, ddebt); recomputeAllSnapshots(); save(); render(); }); });
         break;
       }
 
@@ -8793,10 +9622,16 @@
       case "price-holding": priceModal(findHolding(id)); break;
       case "open-holding": state.holdingId = id; state.route = "holding"; render(); break;
       case "add-txn": transactionModal(findHolding(id), el.getAttribute("data-type")); break;
+      case "reconcile-shares": dividendReinvestmentModal(findHolding(id)); break;
+      case "edit-drp": dividendReinvestmentModal(findHolding(el.getAttribute("data-hold")), id); break;
+      case "del-drp": confirmDeleteDividendReinvestment(findHolding(el.getAttribute("data-hold")), id); break;
       case "edit-txn": {
         var eh = findHolding(el.getAttribute("data-hold"));
         var et = eh && (eh.transactions || []).filter(function (t) { return t.id === id; })[0];
-        if (eh && et) transactionEditModal(eh, et);
+        if (eh && et) {
+          if (et.origin === "drp" && et.linkId) dividendReinvestmentModal(eh, et.linkId);
+          else transactionEditModal(eh, et);
+        }
         break;
       }
       case "edit-frozen-holding": frozenHoldingEditModal(findHolding(id), state.month); break;
@@ -8829,19 +9664,49 @@
       }
       case "del-txn": {
         var hold = findHolding(el.getAttribute("data-hold"));
-        if (hold) { hold.transactions = hold.transactions.filter(function (t) { return t.id !== id; }); repropagateHolding(hold); save(); render(); }
+        var delTxn = hold && (hold.transactions || []).filter(function (t) { return t.id === id; })[0];
+        if (hold && delTxn && delTxn.origin === "drp" && delTxn.linkId) confirmDeleteDividendReinvestment(hold, delTxn.linkId);
+        else if (hold && delTxn) {
+          var delTxnIdx = hold.transactions.indexOf(delTxn);
+          confirmDelete("Delete transaction?",
+            "Removes this buy or sale from the holding history. You can undo this right after.",
+            function () {
+              hold.transactions = hold.transactions.filter(function (t) { return t.id !== id; });
+              repropagateHolding(hold); save(); render();
+              toastUndo("Transaction deleted", function () {
+                hold.transactions.splice(Math.max(0, Math.min(delTxnIdx, hold.transactions.length)), 0, delTxn);
+                repropagateHolding(hold); save(); render();
+              });
+            }, "Delete transaction");
+        }
         break;
       }
       case "add-dividend": dividendModal(findHolding(id)); break;
       case "edit-dividend": {
         var divH = findHolding(el.getAttribute("data-hold"));
         var divD = divH && (divH.dividends || []).filter(function (x) { return x.id === id; })[0];
-        if (divH && divD) dividendModal(divH, divD);
+        if (divH && divD) {
+          if (divD.origin === "drp" && divD.linkId) dividendReinvestmentModal(divH, divD.linkId);
+          else dividendModal(divH, divD);
+        }
         break;
       }
       case "del-dividend": {
         var dvHold = findHolding(el.getAttribute("data-hold"));
-        if (dvHold) { dvHold.dividends = (dvHold.dividends || []).filter(function (x) { return x.id !== id; }); save(); render(); }
+        var dvRow = dvHold && (dvHold.dividends || []).filter(function (x) { return x.id === id; })[0];
+        if (dvHold && dvRow && dvRow.origin === "drp" && dvRow.linkId) confirmDeleteDividendReinvestment(dvHold, dvRow.linkId);
+        else if (dvHold && dvRow) {
+          var dvIdx = dvHold.dividends.indexOf(dvRow);
+          confirmDelete("Delete dividend?",
+            "Removes this dividend from the holding history. You can undo this right after.",
+            function () {
+              dvHold.dividends = (dvHold.dividends || []).filter(function (x) { return x.id !== id; }); save(); render();
+              toastUndo("Dividend deleted", function () {
+                dvHold.dividends.splice(Math.max(0, Math.min(dvIdx, dvHold.dividends.length)), 0, dvRow);
+                save(); render();
+              });
+            }, "Delete dividend");
+        }
         break;
       }
       case "del-holding": {
@@ -8862,9 +9727,18 @@
       case "del-ledger": {
         var lk = kind === "expense" ? "expenses" : "incomes";
         var delLedg = db[lk].filter(function (x) { return x.id === id; })[0];
-        db[lk] = db[lk].filter(function (x) { return x.id !== id; });
-        recomputeAllSnapshots(); save(); render();
-        toastUndo((kind === "expense" ? "Expense" : "Income") + " deleted", function () { if (delLedg) db[lk].push(delLedg); recomputeAllSnapshots(); save(); render(); });
+        var delLedgIdx = db[lk].indexOf(delLedg), ledgerName = kind === "expense" ? "expense" : "income";
+        if (!delLedg) break;
+        confirmDelete("Delete " + ledgerName + "?",
+          "Removes this " + ledgerName + " entry from Cash Flow. You can undo this right after.",
+          function () {
+            db[lk] = db[lk].filter(function (x) { return x.id !== id; });
+            recomputeAllSnapshots(); save(); render();
+            toastUndo((kind === "expense" ? "Expense" : "Income") + " deleted", function () {
+              db[lk].splice(Math.max(0, Math.min(delLedgIdx, db[lk].length)), 0, delLedg);
+              recomputeAllSnapshots(); save(); render();
+            });
+          }, "Delete " + ledgerName);
         break;
       }
 
@@ -8873,10 +9747,16 @@
       case "del-invoice": {
         var vt = viewedTax();
         var delIv = vt.invoices.filter(function (x) { return x.id === id; })[0];
+        var delIvIdx = vt.invoices.indexOf(delIv);
+        var delIvLocked = vt.sourceSnapshot && vt.sourceSnapshot.invoiceAmounts && vt.sourceSnapshot.invoiceAmounts[id];
         confirmDelete("Delete invoice?",
-          "This permanently removes the invoice" + (delIv ? " (" + fmt(delIv.amount, delIv.currency) + (delIv.note ? " - " + esc(delIv.note) : "") + ")" : "") + " from your freelance income. This can't be undone.",
+          "Removes this invoice from your freelance income. You can undo this right after.",
           function () { vt.invoices = vt.invoices.filter(function (x) { return x.id !== id; }); syncArchivedInvoiceSnapshot(vt); save(); render();
-            toastUndo("Invoice deleted", function () { if (delIv) vt.invoices.push(delIv); syncArchivedInvoiceSnapshot(vt); save(); render(); }); },
+            toastUndo("Invoice deleted", function () {
+              if (delIv) vt.invoices.splice(Math.max(0, Math.min(delIvIdx, vt.invoices.length)), 0, delIv);
+              if (delIvLocked != null && vt.sourceSnapshot && vt.sourceSnapshot.invoiceAmounts) vt.sourceSnapshot.invoiceAmounts[id] = delIvLocked;
+              syncArchivedInvoiceSnapshot(vt); save(); render();
+            }); },
           "Delete invoice");
         break;
       }
@@ -8944,7 +9824,17 @@
           (db.taxArchive || []).some(function (a) { return a.currency === id || (a.invoices || []).some(function (iv) { return iv.currency === id; }); }) ||
           db.settings.baseCurrency === id || db.settings.secondaryCurrency === id;
         if (curInUse) { toast("Currency is in use"); break; }
-        db.currencies = db.currencies.filter(function (c) { return c.code !== id; }); save(); render(); break;
+        var delCurrency = curByCode(id), delCurrencyIdx = db.currencies.indexOf(delCurrency);
+        confirmDelete("Delete " + id + "?",
+          "Removes this unused currency and its saved FX rate. You can undo this right after.",
+          function () {
+            db.currencies = db.currencies.filter(function (c) { return c.code !== id; }); save(); render();
+            toastUndo("Currency deleted", function () {
+              if (delCurrency) db.currencies.splice(Math.max(0, Math.min(delCurrencyIdx, db.currencies.length)), 0, delCurrency);
+              save(); render();
+            });
+          }, "Delete currency");
+        break;
       }
 
       case "add-category": categoryModal(kind); break;
@@ -8982,11 +9872,23 @@
 
       case "snooze-backup": db.meta.backupSnooze = Date.now() + 7 * DAY; save(); render(); break;
       case "undo-delete": runUndo(); break;
+      case "dismiss-undo": dismissUndo(); break;
       case "apply-update": applyUpdate(); break;
       case "show-fetch-fails": fetchFailModal(); break;
       case "del-recurring": {
-        db.recurring = (db.recurring || []).filter(function (r) { return r.id !== id; });   // stop future months; past entries stay
-        save(); render(); toast("Recurring stopped");
+        var delRecurring = (db.recurring || []).filter(function (r) { return r.id === id; })[0];
+        var delRecurringIdx = (db.recurring || []).indexOf(delRecurring);
+        if (!delRecurring) break;
+        confirmDelete("Stop recurring transaction?",
+          "Stops future monthly entries. Past Cash Flow entries stay unchanged, and you can undo this right after.",
+          function () {
+            db.recurring = (db.recurring || []).filter(function (r) { return r.id !== id; });
+            save(); render();
+            toastUndo("Recurring stopped", function () {
+              db.recurring.splice(Math.max(0, Math.min(delRecurringIdx, db.recurring.length)), 0, delRecurring);
+              save(); render();
+            });
+          }, "Stop recurring");
         break;
       }
       case "load-sample": loadSampleData(); break;
@@ -9147,19 +10049,12 @@
       var inModal = !!el.closest(".modal");
       // In the setup wizard the country never overrides the manually chosen Base Currency;
       // only the Tax Settings modal still aligns the reporting currency with the country.
-      applyTaxPreset(el.value, !inModal);
-      // Switching a country preset is a settings change, NOT a year rollover. Align the tracked tax-year
-      // LABEL to the new country's current fiscal year, but never archive/reset - the user's invoices,
-      // employment income and tax-paid must survive a preset switch. (Real time-based freezing still runs
-      // on boot via maybeAutoFreezeTaxYear; aligning the label here also stops that boot pass from then
-      // treating the relabelled year as a missed rollover and wiping the data on next launch.)
-      // Relabel the live year to the new country's current FY - but NOT if that label already exists in the
-      // archive (switching between a split-FY and a calendar-FY country can produce a colliding label right
-      // after a rollover). On collision keep the current label so the two years stay distinct and reachable.
-      if (db.tax) {
-        var newLabel = expectedFYLabel();
-        var collides = (db.taxArchive || []).some(function (a) { return a && a.year === newLabel; });
-        if (!collides) { db.tax.year = newLabel; if (state.taxYear) state.taxYear = db.tax.year; }
+      var countrySwitch = switchTaxCountryPreset(el.value, !inModal);
+      if (!countrySwitch.ok) {
+        el.value = db.settings.country;
+        toast("Can't switch country: " + countrySwitch.year + " already exists in Tax History");
+        if (inModal) taxConfigModal(); else render();
+        return;
       }
       save();
       if (inModal) taxConfigModal();   // re-open the Tax Settings modal with the preset values loaded
@@ -9338,11 +10233,13 @@
       var addKind = (state.route === "cashflow") ? cfAddKind() : state.route;
       var isExpense = (addKind === "expense" || addKind === "expenses");
       var recur = checked("q-recur");
-        var qAmt = num(val("q-amt"));
-        if (qAmt <= 0) { toast("Enter an amount greater than zero"); return; }
-        var obj = { id: uid(), month: state.month, category: val("q-cat"), amount: qAmt, currency: val("q-cur"), note: val("q-note").trim() };
+      var amountInput = validatedInputNumber("q-amt", "amount", { positive: true });
+      if (!amountInput.ok) return;
+      var obj = { id: uid(), month: state.month, category: val("q-cat"), amount: amountInput.value, currency: val("q-cur"), note: val("q-note").trim() };
       if (isExpense && checked("q-joint")) {
-        var qsv = val("q-share"); obj.joint = true; obj.share = qsv === "" ? 50 : Math.max(0, Math.min(100, num(qsv)));
+        var qsv = val("q-share"), qShare = qsv === "" ? { ok: true, value: 50 } : validatedInputNumber("q-share", "ownership share", { min: 0, max: 100 });
+        if (!qShare.ok) return;
+        obj.joint = true; obj.share = qShare.value;
       }
       if (recur) {
         // Create a monthly rule; tag THIS entry as the current month's occurrence so applyRecurring won't dupe it.
@@ -9443,8 +10340,9 @@
     var chip = e.target && e.target.closest ? e.target.closest("#help-faq-chips .fchip") : null;
     if (!chip) return;
     var box = document.getElementById("help-faq-chips");
-    box.querySelectorAll(".fchip").forEach(function (c) { c.classList.remove("on"); });
+    box.querySelectorAll(".fchip").forEach(function (c) { c.classList.remove("on"); c.setAttribute("aria-pressed", "false"); });
     chip.classList.add("on");
+    chip.setAttribute("aria-pressed", "true");
     filterHelpFaq();
   });
   // Single-open accordion: close any other open question BEFORE the clicked one expands.

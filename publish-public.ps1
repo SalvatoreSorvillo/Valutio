@@ -13,7 +13,7 @@ function Get-PythonCommand {
     if (Get-Command python -ErrorAction SilentlyContinue) {
         return "python"
     }
-    throw "Python was not found. Install Python for Windows, then reopen PowerShell."
+    throw "Python was not found on PATH. Install Python for Windows, reopen PowerShell, then run: python -m pip install rjsmin rcssmin"
 }
 
 $publisher = Join-Path $PSScriptRoot "Scripts\publish-public.py"

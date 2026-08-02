@@ -11,7 +11,7 @@ name "Valutio" reliably pointing to the official project, so users are never
 misled about what they are running or who stands behind it.
 
 The Trademarks are **not** licensed under the GNU Affero General Public License
-or any other open-source license that covers the code.
+v3.0 or later, or any other open-source license that covers the code.
 
 ## Allowed without permission
 

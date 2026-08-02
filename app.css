@@ -53,6 +53,8 @@
   /* ---- One accent (interactive, focus) ---- */
   --accent:       #438cff;
   --accent-press: #2f75e8;
+  --accent-button: #2563c9;
+  --accent-button-press: #1d55ad;
   --accent-soft:  rgba(67, 140, 255, 0.08);
   --accent-line:  rgba(67, 140, 255, 0.20);
   --head-hl: var(--surface-2);   /* table/card header fill */
@@ -96,6 +98,7 @@
   --shadow: 0 1px 2px rgba(0,0,0,0.34), 0 12px 32px rgba(0,0,0,0.24);
   --chart-grid: #26262c;
   --chart-grid-strong: #3a4150;
+  --chart-label: #a3a3a3;
 
   --font: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
@@ -156,25 +159,30 @@
 
   --text:   #202124;
   --text-2: #5f6368;
-  --text-3: #80868b;
+  --text-3: #656b73;
   --ico-mid:   #6b7280;
-  --ico-faint: #9aa0a6;
+  --ico-faint: #6b7280;
 
+  --accent: #1f63c8;
+  --accent-press: #174f9f;
+  --accent-button: #1f63c8;
+  --accent-button-press: #174f9f;
   --accent-soft:  rgba(67, 140, 255, 0.10);
   --accent-line:  rgba(47, 117, 232, 0.24);
   --head-hl: var(--surface-2);
   --head-hl-line: var(--line);
   --hero-accent-fill: var(--surface);
 
-  --pos: #059669;
+  --pos: #047857;
   --pos-soft: rgba(5, 150, 105, 0.11);
-  --neg: #e54860;
+  --neg: #be123c;
   --neg-soft: rgba(225, 29, 72, 0.10);
   --d-green: oklch(0.56 0.13 155);
 
   --shadow: 0 1px 2px rgba(15,23,42,0.08), 0 14px 36px rgba(15,23,42,0.08);
   --chart-grid: #e3e7ee;
   --chart-grid-strong: #cbd3df;
+  --chart-label: #5f6368;
 }
 
 :root.theme-dim {
@@ -192,19 +200,23 @@
 
   --text:   #171d24;
   --text-2: #3f4a56;
-  --text-3: #596574;
+  --text-3: #485460;
   --ico-mid:   #4d5b68;
-  --ico-faint: #6d7a88;
+  --ico-faint: #596574;
 
+  --accent: #1b5fbf;
+  --accent-press: #154c99;
+  --accent-button: #1b5fbf;
+  --accent-button-press: #154c99;
   --accent-soft:  rgba(67, 140, 255, 0.11);
   --accent-line:  rgba(47, 117, 232, 0.25);
   --head-hl: var(--surface-2);
   --head-hl-line: var(--line);
   --hero-accent-fill: var(--surface);
 
-  --pos: #047857;
+  --pos: #065f46;
   --pos-soft: rgba(4, 120, 87, 0.11);
-  --neg: #c43b46;
+  --neg: #9f1239;
   --neg-soft: rgba(196, 59, 70, 0.045);
   --dim-expense-hover: #d7d6de;
   --hist-income-chart: #1a9a79;
@@ -213,6 +225,7 @@
   --shadow: 0 1px 2px rgba(31,41,55,0.10), 0 14px 34px rgba(31,41,55,0.11);
   --chart-grid: #b8c2cf;
   --chart-grid-strong: #9faaba;
+  --chart-label: #485460;
 }
 
 * { box-sizing: border-box; }
@@ -439,10 +452,14 @@ button { font-family: inherit; }
 /* Buttons never inherited the input/select outline reset, so they fell back to the
    browser's square UA focus ring. Drop it; keyboard users get a rounded accent ring. */
 .btn:focus { outline: none; }
-.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
-.btn.primary { background: var(--accent); border-color: color-mix(in oklch, var(--accent) 78%, white 12%); color: #fff; box-shadow: 0 8px 20px rgba(47,117,232,0.18); }
+.btn:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 5px var(--accent);
+}
+.btn.primary { background: var(--accent-button); border-color: color-mix(in oklch, var(--accent-button) 78%, white 12%); color: #fff; box-shadow: 0 8px 20px rgba(47,117,232,0.18); }
 .btn.primary .ico { color: #fff; }
-.btn.primary:hover { background: var(--accent-press); border-color: color-mix(in oklch, var(--accent-press) 85%, white 10%); box-shadow: 0 10px 24px rgba(47,117,232,0.22); }
+.btn.primary:hover { background: var(--accent-button-press); border-color: color-mix(in oklch, var(--accent-button-press) 85%, white 10%); box-shadow: 0 10px 24px rgba(47,117,232,0.22); }
 .btn.accent-soft { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
 .btn.accent-soft .ico { color: var(--accent); }
 .btn.accent-soft:hover { background: color-mix(in oklch, var(--accent) 11%, transparent); }
@@ -475,11 +492,11 @@ button { font-family: inherit; }
 :root.theme-light .btn.ghost:hover,
 :root.theme-dim .btn.ghost:hover { background: var(--surface-2); box-shadow: none; }
 :root.theme-light .btn.primary,
-:root.theme-dim .btn.primary { background: var(--accent); color: #fff; }
+:root.theme-dim .btn.primary { background: var(--accent-button); color: #fff; }
 :root.theme-light .btn.primary:hover,
 :root.theme-dim .btn.primary:hover {
-  background: var(--accent-press);
-  border-color: color-mix(in oklch, var(--accent-press) 85%, white 10%);
+  background: var(--accent-button-press);
+  border-color: color-mix(in oklch, var(--accent-button-press) 85%, white 10%);
   color: #fff;
   box-shadow: 0 10px 24px rgba(47,117,232,0.18);
 }
@@ -875,7 +892,8 @@ td.num.cost { color: var(--red); }
 }
 .inv-table tbody tr { position: relative; }
 .hold-acts { display: flex; align-items: center; justify-content: flex-end; gap: 3px; opacity: 0; pointer-events: none; transition: opacity .12s; }
-.inv-table tbody tr:hover .hold-acts { opacity: 1; pointer-events: auto; }
+.inv-table tbody tr:hover .hold-acts,
+.inv-table tbody tr:focus-within .hold-acts { opacity: 1; pointer-events: auto; }
 .inv-table .hold-acts .btn.sm { min-height: 25px; padding: 4px 6px; font-size: 11.2px; }
 .inv-table .hold-acts .btn.icon-only,
 .inv-table .hold-acts .btn[data-act="price-holding"],
@@ -888,7 +906,7 @@ td.num.cost { color: var(--red); }
 /* Titles all share ONE vertical anchor (middle) so none sits higher than the rest, regardless of
    how many lines a label wraps to. Titles are centered horizontally; the Holding column's DATA stays
    left-aligned (not centered). Uniform 12px titles. */
-.inv-table thead th { text-align: right; background: var(--surface-3); background-color: var(--surface-3); color: var(--text); vertical-align: middle; white-space: nowrap; }
+.inv-table thead th { text-align: right; background: var(--surface-3); background-color: var(--surface-3); color: var(--text); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .inv-table tbody td, .inv-table tfoot td { text-align: right; vertical-align: middle; }
 .inv-table tbody td { background: var(--surface); background-color: var(--surface); }
 .inv-table tbody tr:hover td { background: color-mix(in oklch, var(--surface-2) 70%, transparent); }
@@ -965,7 +983,12 @@ input, select, textarea {
   font-size: 13.4px; font-family: inherit; font-weight: 500;
   box-shadow: none;
 }
-input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input:focus-visible, textarea:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--surface);
+}
 input[type="number"] { -moz-appearance: textfield; }
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
@@ -1010,10 +1033,15 @@ input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; marg
 :root.theme-light .rc-btn:not(.on) {
   background: transparent;
 }
-/* Dropdowns: no bright/white ring when clicked, focused or expanded - a subtle accent-line
-   border (and a flat outline reset for :focus-visible) keeps the dark theme seamless. */
+/* Dropdown focus uses the same unmistakable keyboard ring as every other control. */
 select:focus, select:focus-visible, select:active {
-  outline: none; border-color: var(--accent-line); box-shadow: none;
+  border-color: var(--accent);
+}
+select:focus { outline: none; }
+select:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--surface);
 }
 /* inline checkbox + label row (e.g. Include in Net Worth Calculations) */
 .check-row { display: flex; flex-direction: row; align-items: center; gap: 9px; cursor: pointer; color: var(--text); font-weight: 600; }
@@ -1104,7 +1132,8 @@ select:focus, select:focus-visible, select:active {
 .currency-option:hover,
 .currency-option:focus-visible {
   background: var(--surface-3);
-  outline: none;
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
 }
 .currency-code {
   font-family: var(--mono);
@@ -1304,7 +1333,7 @@ select:focus, select:focus-visible, select:active {
 .chart-wrap svg.chart { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .chart-ovl { position: absolute; inset: 0; pointer-events: none; font-variant-numeric: tabular-nums; }
 .chart-dot { position: absolute; width: 6px; height: 6px; border-radius: 50%; transform: translate(-50%, -50%); }
-.chart-lbl { position: absolute; font-size: 10px; line-height: 1; color: #6b7280; white-space: nowrap; letter-spacing: -0.01em; }
+.chart-lbl { position: absolute; font-size: 10px; line-height: 1; color: var(--chart-label); white-space: nowrap; letter-spacing: -0.01em; }
 .chart-lbl-x { transform: translate(-50%, -50%); }
 .chart-lbl-y { transform: translate(-100%, -50%); }
 .chart-empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 13px; }
@@ -1362,6 +1391,12 @@ select:focus, select:focus-visible, select:active {
 }
 .toast-undo:hover { background: color-mix(in oklch, var(--accent) 11%, transparent); }
 .toast-undo .ico-svg { width: 13px; height: 13px; }
+.toast-dismiss {
+  display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
+  padding: 0; border: 0; border-radius: 50%; color: var(--text-2); background: transparent; cursor: pointer;
+}
+.toast-dismiss:hover { color: var(--text); background: var(--surface-3); }
+.toast-dismiss .ico-svg { width: 14px; height: 14px; }
 /* recurring cash flow */
 .recur-tag { display: inline-flex; align-items: center; padding: 2px 5px; color: var(--accent); }
 .recur-tag .ico-svg { width: 12px; height: 12px; }
@@ -1402,17 +1437,19 @@ select:focus, select:focus-visible, select:active {
 }
 .chip .chip-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .chip .x {
-  cursor: pointer; color: var(--text-faint); font-weight: 700; font-size: 13px; line-height: 1;
-  display: inline-flex; align-items: center; transition: color 0.12s;
+  min-width: 24px; min-height: 24px; margin: -4px -6px -4px 0; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent;
+  cursor: pointer; color: var(--text-faint); font-family: inherit; font-weight: 700; font-size: 13px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center; transition: color 0.12s, background-color 0.12s;
 }
-.chip .x:hover { color: var(--red); }
+.chip .x:hover { color: var(--red); background: var(--neg-soft); }
 /* Settings > Categories: cap the chip box at 10 rows then clip (each chip row is ~40px: 32px chip +
    8px margin). Stops a narrow window from stretching the card endlessly - extra rows are sliced off,
    like the dashboard allocation. The "+ Add" button sits outside this box so it's always reachable. */
 .cat-chips { max-height: 400px; overflow: hidden; }
 
 /* delete button that lines up with an input inside a .row (fields carry a 14px bottom margin) */
-.bk-del { flex: 0 0 auto; width: 38px; height: 38px; padding: 0; font-size: 14px; margin-bottom: 14px; justify-content: center; gap: 0; }
+.bk-del { flex: 0 0 auto; width: 44px; height: 44px; padding: 0; font-size: 14px; margin-bottom: 14px; justify-content: center; gap: 0; }
 
 .backup-banner {
   display: flex; align-items: center; gap: 12px; flex-wrap: nowrap;
@@ -1420,7 +1457,7 @@ select:focus, select:focus-visible, select:active {
   color: var(--text); border-radius: var(--r-md); padding: 8px 16px; margin-bottom: 16px; font-size: 13.2px;
   box-shadow: 0 1px 2px rgba(0,0,0,0.22);
 }
-.backup-banner .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.backup-banner .btn.primary { background: var(--accent-button); border-color: var(--accent-button); color: #fff; }
 .backup-banner .btn.ghost { background: var(--surface); border-color: var(--line-2); color: var(--text); }
 .backup-banner .bb-msg { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 12px; }
 /* Keep action buttons from being squeezed too far / breaking their own label */
@@ -2364,6 +2401,79 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
 .hd-row .hd-v .btn.sm { padding: 2px 7px; margin-left: 4px; }
 .hd-row .hd-v-price { display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .hd-row .hd-v-price .btn.sm { margin-left: 0; }
+.hd-row .hd-v-reconcile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+}
+.hd-v-reconcile .hd-share-count {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hd-row .hd-v-reconcile .btn.sm { margin-left: 0; }
+.drp-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+.drp-summary-item {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+}
+.drp-summary-label {
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.drp-summary-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drp-summary-diff {
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+.drp-status {
+  display: block;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.drp-status:empty { display: none; }
+.input-output {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 37px;
+  padding: 8px 11px;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--surface-2) 86%, #000);
+  color: var(--text);
+  font-size: 13.4px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 @media (max-width: 920px) { .hd-grid { grid-template-columns: 1fr; } }
 
 /* Combined "Viewing period" control - a Year selector scopes the Month dropdown (max 12 entries). */
@@ -2515,7 +2625,12 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
 .faq { border-top: 1px solid var(--line); }
 .faq details { border-bottom: 1px solid var(--line); }
 .faq summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 2px; font-size: 14.5px; font-weight: 600; color: var(--text-2); -webkit-tap-highlight-color: transparent; outline: none; }
-.faq summary:focus, .faq summary:focus-visible { outline: none; }
+.faq summary:focus { outline: none; }
+.faq summary:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--r-sm);
+}
 .faq summary::-webkit-details-marker { display: none; }
 .faq summary .chev { width: 9px; height: 9px; border-right: 2px solid var(--text-3); border-bottom: 2px solid var(--text-3); transform: rotate(45deg); transition: transform 0.18s; flex: 0 0 auto; margin-right: 4px; }
 .faq details[open] summary .chev { transform: rotate(-135deg); border-color: var(--accent); }
@@ -2907,7 +3022,10 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     align-items: stretch;
     gap: 4px;
     overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-inline: contain;
+    overscroll-behavior-block: none;
+    touch-action: pan-x;
     scroll-snap-type: x proximity;
     scrollbar-width: none;
     background: var(--surface);
@@ -3014,6 +3132,20 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   .tax-split-legend {
     grid-template-columns: minmax(0, 1fr);
   }
+  .dash-twoup .alloc-legend {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: clamp(12px, 3vw, 20px);
+  }
+  .dash-twoup .alloc-row {
+    overflow: hidden;
+    margin-bottom: 0;
+  }
+  .dash-twoup .alloc-txt {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+  .dash-twoup .alloc-legend > .muted:only-child { grid-column: 1 / -1; }
   .cf-balance-body,
   .cf-balance-metrics,
   .tax-position-body {
@@ -3037,6 +3169,37 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   .inline-form { gap: 12px; }
   .inline-form > *,
   .row > * { width: 100%; }
+  .holding-search-row {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 8px;
+  }
+  .holding-search-row > .field {
+    width: auto;
+    min-width: 0;
+  }
+  .holding-search-row #h-searchbtn-field .btn { white-space: nowrap; }
+  #benchmark-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 12px;
+  }
+  #benchmark-form > .row {
+    display: block;
+    min-width: 0;
+  }
+  #benchmark-form > .row > .field {
+    width: 100%;
+    max-width: none !important;
+    margin-bottom: 0;
+  }
+  #benchmark-form > .btn {
+    width: auto;
+    justify-content: center;
+    white-space: nowrap;
+  }
   .seg-btn { min-height: 68px; }
   input,
   select,
@@ -3053,6 +3216,8 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   .btn,
   .btn.sm { min-height: 44px; }
   .btn.icon-only { min-width: 44px; justify-content: center; }
+  .btn.sm[data-act^="del-"] { min-width: 44px; justify-content: center; }
+  .link-name.inv-name { display: inline-flex; align-items: center; min-height: 44px; }
   .inv-table .hold-acts .btn.sm {
     min-width: 44px !important;
     min-height: 44px !important;
@@ -3069,6 +3234,7 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   .modal.install-modal .modal-x,
   .backup-banner .bb-x,
   .toast-undo,
+  .toast-dismiss,
   .cf-tab,
   .rc-btn,
   .swatch,
@@ -3080,6 +3246,8 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     align-items: center;
     justify-content: center;
   }
+  .currency-option,
+  .bk-del { min-width: 44px; min-height: 44px; }
   .m-x,
   .modal-x,
   .modal.install-modal .modal-x,
@@ -3144,6 +3312,18 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     -webkit-overflow-scrolling: touch;
   }
   .table-wrap table { width: max(100%, max-content); }
+  .txn-scroll {
+    overflow-x: scroll;
+    scrollbar-width: thin;
+    scrollbar-color: var(--ico-mid) var(--surface-2);
+  }
+  .txn-scroll::-webkit-scrollbar:horizontal { height: 10px; }
+  .txn-scroll::-webkit-scrollbar-track:horizontal { background: var(--surface-2); }
+  .txn-scroll::-webkit-scrollbar-thumb:horizontal {
+    background: var(--ico-mid);
+    border: 2px solid var(--surface-2);
+    border-radius: var(--r-pill);
+  }
   .cf-ledger {
     overflow-x: auto !important;
     overflow-y: hidden !important;
@@ -3167,7 +3347,10 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     gap: 6px;
     padding-bottom: 4px;
     overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-inline: contain;
+    overscroll-behavior-block: none;
+    touch-action: pan-x;
     scrollbar-width: none;
   }
   .settings-nav::-webkit-scrollbar { display: none; }
@@ -3444,13 +3627,27 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
 }
 
 @media (max-width: 680px) {
+  .drp-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .input-output { min-height: 44px; font-size: 16px; }
+  .drp-summary-diff {
+    grid-column: 1 / -1;
+    padding-top: 10px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
   .dash-twoup .donut-wrap,
   .dash-twoup .wc-flex {
     flex-direction: column;
     align-items: stretch;
   }
+  .dash-twoup .donut-wrap { gap: 20px; }
   .dash-twoup .donut,
   .dash-twoup .wc-ring { align-self: center; }
+  .holding-search-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .holding-search-row > .field:first-child { grid-column: 1 / -1; }
   .sc-rule-row { grid-template-columns: minmax(0, 1fr); }
   .sc-rule-row label { padding-top: 0; }
   .chart-lbl-x {
@@ -3459,6 +3656,18 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     overflow: hidden;
     text-align: center;
   }
+  .chart-lbl-x.chart-edge-start {
+    transform: translate(0, -50%);
+    text-align: left;
+  }
+  .chart-lbl-x.chart-edge-end {
+    transform: translate(-100%, -50%);
+    text-align: right;
+  }
+  select.tax-year-sel {
+    width: clamp(178px, 62vw, 210px);
+  }
+  .tax-actions { flex-wrap: nowrap; }
   .settings-content .panel > .flex.between.center {
     align-items: stretch;
     flex-direction: column;
@@ -3493,6 +3702,11 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     padding-top: 14px;
     border-top: 1px solid var(--line);
   }
+}
+
+@media (max-width: 560px) {
+  #benchmark-form { grid-template-columns: minmax(0, 1fr); }
+  #benchmark-form > .btn { width: 100%; }
 }
 
 @media (max-width: 600px) {
@@ -3562,6 +3776,8 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
 }
 
 @media (max-width: 380px) {
+  .drp-summary { grid-template-columns: minmax(0, 1fr); }
+  .drp-summary-diff { grid-column: auto; }
   .settings-content .backup-controls { grid-template-columns: minmax(0, 1fr); }
   .settings-content .backup-controls .backup-schedule-field { grid-column: auto; }
 }
@@ -3583,4 +3799,24 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     min-width: 38px;
     min-height: 38px;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+  .skeleton { animation: none; }
+}
+
+/* Non-.btn controls (navigation, segmented controls, chips and icon controls) share
+   one visible keyboard affordance instead of relying on browser-specific defaults. */
+button:not(.btn):focus-visible,
+a[href]:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }

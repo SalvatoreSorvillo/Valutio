@@ -48,9 +48,9 @@ const invoices = months.filter((month, i) => i % 3 === 0 && month >= "2025-07" &
 }));
 
 const db = {
-  version: 2,
+  version: 3,
   setupComplete: true,
-  meta: { lastBackup: Date.now(), backupSnooze: 0, customYears: [], customMonths: [], lastNotifyMonth: "", recurringApplied: {} },
+  meta: { lastBackup: Date.now(), backupSnooze: 0, customYears: [], customMonths: [], lastNotifyMonth: "", recurringApplied: {}, migrations: { v2: { at: now }, v3: { at: now } } },
   settings: {
     name: "Stress Wallet", baseCurrency: "EUR", secondaryCurrency: "AUD", theme: "light", language: "en", snapshotMode: "auto", country: "AU",
     stockProvider: "yahoo", stockApiKey: "", cryptoProvider: "coingecko", cryptoApiKey: "",

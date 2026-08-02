@@ -2,7 +2,9 @@
 
 Valutio is a free, open-source, local-first personal finance app for tracking net worth, investments, accounts, cash flow, tax, retirement, goals and history.
 
-It runs in the browser, installs as a PWA, and works offline. There is no account, no cloud sync, no bank connection and no subscription. Your financial data stays in your browser storage unless you export a backup or refresh live market data.
+Created and maintained by **Salvatore Sorvillo**.
+
+The current community app runs in the browser, installs as a PWA, and works offline. It requires no account or subscription and has no cloud sync or bank connection. Your financial data stays in your browser storage unless you export a backup or refresh live market data.
 
 You can also find the app on its website: https://valutio.app/
 
@@ -157,9 +159,10 @@ Before a public release, bump the service-worker cache version in `sw.js` and th
 - `statement-categorizer.js`: statement parsing, rules, manual review, Excel reports and append-only Cash Flow application.
 - `MAINTAINER_GUIDE.md`: authoritative architecture, data and financial-behavior reference.
 - `AGENTS.md`: short repository instructions that point maintainers to the authoritative guide.
+- `.github/PULL_REQUEST_TEMPLATE.md`: contribution checklist and recorded CLA acknowledgement.
 - `sw.js`: service worker for install/offline support.
 - `manifest.webmanifest`: PWA metadata.
-- `Fonts/`: self-hosted Hanken Grotesk and Material Symbols assets.
+- `Fonts/`: self-hosted Hanken Grotesk and Material Symbols assets with their third-party license notices.
 - `Icons/`: app icons and Valutio brand marks used by the app.
 - `Templates/`: Excel starter and cash-flow templates.
 - `Vendor/`: SheetJS and PDF.js browser bundles with their licenses for offline Excel and statement PDF support.
@@ -174,13 +177,15 @@ Before a public release, bump the service-worker cache version in `sw.js` and th
 - `Scripts/validate-wallet-backup.mjs`: JSON backup integrity checker.
 - `Scripts/generate-stress-wallet.mjs`: synthetic multi-year test wallet generator.
 - `PUBLISHING.md`: first release and update workflow.
-- `LICENSE`: AGPL-3.0 license.
+- `LICENSE`: GNU AGPL v3 license text.
 - `Rules/TRADEMARKS.md`: Valutio name and logo policy.
 - `Rules/CLA.md`: contribution license terms.
 
 ## License and trademarks
 
-Valutio is licensed under the GNU Affero General Public License v3.0. See `LICENSE`.
+Copyright © 2026 Salvatore Sorvillo.
+
+Valutio is licensed under the GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`). See `LICENSE`.
 
 The Valutio name and logos are trademarks of the project maintainer. The code license does not grant trademark rights. See `Rules/TRADEMARKS.md`.
 
