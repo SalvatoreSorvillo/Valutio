@@ -872,8 +872,8 @@ td.num { font-size: 13px; }
 thead th.num { font-size: 10.8px; }
 td.num.cost { color: var(--red); }
 .act-col, td.act-col { width: 240px; min-width: 240px; }
-/* investments action cluster: lock + Buy / Sell / refresh SVG / X glyph onto one
-   pixel-perfect horizontal centre line inside the hover-revealed Return cell */
+/* Investments action cluster: keep Buy / Sell / refresh / delete controls aligned
+   in the action rail so every row remains immediately actionable. */
 .row-actions { display: flex; align-items: center; justify-content: flex-start; gap: 4px; }
 .row-actions .btn { display: inline-flex; align-items: center; }
 
@@ -891,9 +891,7 @@ td.num.cost { color: var(--red); }
   background: color-mix(in oklch, var(--surface) 88%, var(--canvas));
 }
 .inv-table tbody tr { position: relative; }
-.hold-acts { display: flex; align-items: center; justify-content: flex-end; gap: 3px; opacity: 0; pointer-events: none; transition: opacity .12s; }
-.inv-table tbody tr:hover .hold-acts,
-.inv-table tbody tr:focus-within .hold-acts { opacity: 1; pointer-events: auto; }
+.hold-acts { display: flex; align-items: center; justify-content: flex-end; gap: 3px; opacity: 1; pointer-events: auto; }
 .inv-table .hold-acts .btn.sm { min-height: 25px; padding: 4px 6px; font-size: 11.2px; }
 .inv-table .hold-acts .btn.icon-only,
 .inv-table .hold-acts .btn[data-act="price-holding"],
@@ -2216,6 +2214,18 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
 .cf-ledger tbody { flex: 1 1 auto; min-height: 0; display: block; overflow-y: auto; overflow-x: hidden; background: var(--surface); scrollbar-gutter: stable; }
 .cf-ledger thead tr, .cf-ledger tbody tr, .cf-ledger tfoot tr { display: table; width: 100%; table-layout: fixed; }
 .cf-ledger tbody td { height: 47px; }
+.cf-ledger th:nth-child(1), .cf-ledger td:nth-child(1) { width: 11%; }
+.cf-ledger th:nth-child(2), .cf-ledger td:nth-child(2) { width: 20%; }
+.cf-ledger th:nth-child(3), .cf-ledger td:nth-child(3) { width: 34%; }
+.cf-ledger th:nth-child(4), .cf-ledger td:nth-child(4) { width: 15%; }
+.cf-ledger th:nth-child(5), .cf-ledger td:nth-child(5) { width: 14%; }
+.cf-ledger th:nth-child(6), .cf-ledger td:nth-child(6) { width: 6%; }
+.cf-ledger-note {
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .cf-ledger tbody tr.cf-ledger-empty { height: 100%; }
 .cf-ledger tbody tr.cf-ledger-empty td { height: 100%; }
 .cf-ledger tbody tr:last-child td { border-bottom: 1px solid var(--line); }
@@ -2231,7 +2241,7 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   color: var(--text);
   border-top-color: var(--line);
 }
-.cf-ledger-category { color: var(--text-2); font-weight: 600; }
+.cf-ledger-category { display: inline-block; max-width: 100%; color: var(--text-2); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
 .cf-recurring-card { padding: 12px 16px; margin-bottom: 14px; border-color: var(--line); background: var(--surface); }
 .cf-recurring-card .flex.between.center.mb { margin-bottom: 8px; }
 .cf-recurring-card h2 { font-size: 14px; }
@@ -2632,8 +2642,11 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   border-radius: var(--r-sm);
 }
 .faq summary::-webkit-details-marker { display: none; }
-.faq summary .chev { width: 9px; height: 9px; border-right: 2px solid var(--text-3); border-bottom: 2px solid var(--text-3); transform: rotate(45deg); transition: transform 0.18s; flex: 0 0 auto; margin-right: 4px; }
-.faq details[open] summary .chev { transform: rotate(-135deg); border-color: var(--accent); }
+/* Use a text chevron rather than a two-sided border so the affordance remains crisp without
+   looking like a decorative side tab to static UI audits. */
+.faq summary .chev { width: 18px; height: 18px; display: inline-grid; place-items: center; color: var(--text-3); transition: color 0.18s, transform 0.18s; flex: 0 0 auto; margin-right: 1px; }
+.faq summary .chev::before { content: "›"; display: block; font-size: 24px; line-height: 16px; font-weight: 400; }
+.faq details[open] summary .chev { color: var(--accent); transform: rotate(90deg); }
 .faq details[open] summary { color: var(--accent); }
 .faq .a { padding: 0 30px 18px 2px; color: var(--text-2); font-size: 13.5px; line-height: 1.6; }
 .faq .a strong { color: var(--text); font-weight: 600; }
@@ -2881,9 +2894,17 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   }
 
   .sidebar {
-    display: contents;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    padding: 0;
+    position: static;
+    overflow: visible;
   }
   .sidebar-summary {
+    order: 0;
     position: sticky;
     inset: 0 0 auto;
     z-index: 80;
@@ -2950,6 +2971,7 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   }
 
   .side-period {
+    order: 2;
     width: 100%;
     gap: 5px;
     margin: 0;
@@ -2971,6 +2993,8 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   .sidebar > .nav-sep { display: none; }
 
   .side-foot {
+    /* Keep utility actions above the viewing-period selectors on phones. */
+    order: 1;
     width: 100%;
     min-width: 0;
     margin: 0;
@@ -3007,8 +3031,9 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
   .side-foot .side-donate { max-width: none; }
 
   .nav {
-    position: fixed;
-    z-index: 100;
+    order: 3;
+    position: fixed !important;
+    z-index: 1000;
     left: 0;
     right: 0;
     bottom: 0;
@@ -3031,6 +3056,9 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     background: var(--surface);
     border-top: 1px solid var(--line-2);
     box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.16);
+    transform: translateZ(0);
+    contain: layout paint;
+    will-change: transform;
   }
   .nav::-webkit-scrollbar { display: none; }
   .nav-item {
@@ -3329,7 +3357,18 @@ select.tax-year-sel { width: 168px; min-width: 0; flex: 0 0 auto; }
     overflow-y: hidden !important;
     -webkit-overflow-scrolling: touch;
   }
-  .cf-ledger table { min-width: 720px; }
+  /* Reserve a real action rail on touch layouts. The delete control has a 44px target;
+     the previous 6% column was narrower than Edit + Delete, so the final buttons extended
+     beyond the table's scrollable width and stayed clipped at the right edge. */
+  .cf-ledger table { min-width: 760px; }
+  .cf-ledger thead th:last-child,
+  .cf-ledger tbody td.cf-ledger-actions {
+    width: 96px !important;
+    min-width: 96px !important;
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    white-space: nowrap;
+  }
   .asset-table { min-width: 720px; }
   .month-detail { min-width: max-content; }
   .inv-scroll,

@@ -115,11 +115,19 @@ function checkNonNegative(value, label, allowZero = true) {
   return parsed;
 }
 
+function checkFinite(value, label) {
+  const parsed = decimalNumber(value);
+  if (parsed == null) errors.push(`${label} must be a valid finite number`);
+  return parsed;
+}
+
 function checkPersistedNumericRows() {
   const accounts = list("accounts");
   checkIds(accounts, "account");
   accounts.forEach((account, i) => {
-    checkNonNegative(account.balance, `account row ${i + 1} balance`);
+    // A negative live account is valid for a credit-card/current-account balance.
+    // Debts remain a separate optional tracker with their own non-negative balance.
+    checkFinite(account.balance, `account row ${i + 1} balance`);
     const share = account.share == null ? null : decimalNumber(account.share);
     if (account.share != null && (share == null || share < 0 || share > 100)) errors.push(`account row ${i + 1} share must be 0-100`);
   });

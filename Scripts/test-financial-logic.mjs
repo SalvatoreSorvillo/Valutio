@@ -521,9 +521,16 @@ test("strict validation rejects an exact sub-micro-share oversell", () => {
   assert.notEqual(standalone.status, 0); assert.match(standalone.stderr, /sells more shares/);
 });
 
-test("strict validators reject malformed or negative persisted financial values", () => {
+test("strict validators allow negative account balances but reject malformed values", () => {
+  const negative = wallet();
+  negative.accounts = [{ id: "credit-card", name: "Credit card", currency: "EUR", balance: -125.5 }];
+  const accepted = q.validateDb(negative, { repair: false, strict: true, source: "test" });
+  assert.equal(accepted.errors.some((message) => /account row 1 balance/.test(message)), false);
+  const standaloneAccepted = runBackupValidator(negative);
+  assert.equal(standaloneAccepted.status, 0, standaloneAccepted.stderr);
+
   const d = wallet();
-  d.accounts = [{ id: "account", name: "Account", currency: "EUR", balance: -1 }];
+  d.accounts = [{ id: "account", name: "Account", currency: "EUR", balance: "bad" }];
   d.physicalAssets = [{ id: "asset", name: "Asset", currency: "EUR", value: "bad" }];
   d.goals = [{ id: "goal", name: "Goal", currency: "EUR", cost: 100, currentSavings: -1 }];
   d.recurring = [{ id: "rule", kind: "expense", currency: "EUR", amount: -1, since: "2025-07" }];
@@ -535,6 +542,16 @@ test("strict validators reject malformed or negative persisted financial values"
   });
   const standalone = runBackupValidator(d);
   assert.notEqual(standalone.status, 0);
+});
+
+test("negative account balances reduce net worth without a debt record", () => {
+  const d = wallet();
+  d.accounts = [{ id: "credit-card", name: "Credit card", bucket: "Cash", currency: "EUR", balance: -125.5 }];
+  q.setDb(d);
+  const snapshot = q.buildSnapshot(q.currentMonth());
+  close(snapshot.gross, -125.5);
+  close(snapshot.netWorth, -125.5);
+  assert.equal(snapshot.debtsTotal || 0, 0);
 });
 
 test("Excel preview rollback restores the wallet even when parsing throws", () => {

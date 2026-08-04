@@ -611,6 +611,11 @@
       if (allowZero ? n < 0 : n <= 0) err(label + " must be " + (allowZero ? "zero or higher" : "greater than zero") + ".");
       return n;
     }
+    function finiteAmount(v, label) {
+      var n = decimalNumber(v);
+      if (n == null) err(label + " must be a valid finite number.");
+      return n == null ? 0 : n;
+    }
     if (!d || typeof d !== "object") return { db: defaultDB(), errors: ["Backup root is not a Valutio wallet object."], warnings: [], repairs: 0 };
     if (!d.settings || typeof d.settings !== "object") d.settings = defaultDB().settings;
     if (!d.meta || typeof d.meta !== "object") d.meta = defaultDB().meta;
@@ -620,7 +625,9 @@
     d.currencies.forEach(function (c, i) { if (!c || typeof c !== "object") return; c.code = String(c.code || "").trim().toUpperCase(); c.rate = finiteNumber(c.rate); if (!c.code) err("Currency row " + (i + 1) + " has no code."); if (c.code && seenCurrencies[c.code]) err("Currency " + c.code + " is duplicated."); seenCurrencies[c.code] = 1; if (!(c.rate > 0)) err("Currency " + (c.code || i + 1) + " has an invalid FX rate."); });
     d.accounts.forEach(function (a, i) {
       cleanCurrency(a, "currency", "Account row " + (i + 1));
-      positive(a.balance, "Account row " + (i + 1) + " balance", true);
+      // Accounts may be negative: a live credit-card/current account is a liability
+      // represented directly in the account balance. Debts remain a separate tracker.
+      finiteAmount(a.balance, "Account row " + (i + 1) + " balance");
       if (a.share != null) {
         var share = decimalNumber(a.share);
         if (share == null || share < 0 || share > 100) err("Account row " + (i + 1) + " share must be between 0% and 100%.");
@@ -3774,11 +3781,15 @@
 
     var barSegs = ["Cash", "Savings", "Pension", "Other"].filter(function (k) { return byBucket[k]; })
       .map(function (k) { return { label: k, value: byBucket[k], color: bucketColor(k) }; });
+    // The headline total is net (so negative credit-card balances reduce it), while the
+    // composition bar can only show positive balances. Keeping a separate positive denominator
+    // prevents a liability from producing negative/over-100% CSS widths.
+    var balanceBarTotal = barSegs.reduce(function (s, seg) { return s + Math.max(0, seg.value); }, 0);
     var liquid = (byBucket.Cash || 0) + (byBucket.Savings || 0);
     var pension = byBucket.Pension || 0;
     // "My share / Household" lens toggle (right of the "Total Balance" label) - only when a joint account exists.
     var netToggle = netViewToggle(db.accounts.some(isJoint));
-    var accHero = barHeader("Total Balance", fmtBase(total, 0), barSegs, total, netToggle);
+    var accHero = barHeader("Total Balance", fmtBase(total, 0), barSegs, balanceBarTotal, netToggle);
     var accRows = list.slice().sort(function (a, b) { return b.base - a.base; }).map(function (a) {
       var col = bucketColor(a.bucket);
       var parts = [a.bucket];
@@ -3789,7 +3800,7 @@
         : '<button class="btn sm ghost" data-act="edit-account" data-id="' + a.id + '">Edit</button> <button class="btn sm ghost" data-act="del-account" data-id="' + a.id + '" aria-label="Delete account ' + esc(a.name) + '">\u2715</button>';
       return { color: col, name: esc(a.name), meta: parts.join(" \u00b7 "), valueHtml: fmtBase(a.base), base: a.base, actions: actions };
     });
-    var body = list.length ? accHero + dataBarList(accRows, total)
+    var body = list.length ? accHero + dataBarList(accRows, balanceBarTotal)
       : emptyState("accounts", "No accounts yet", "Add your bank accounts, savings and pension.");
 
     var badge = isCurrent ? statusBadge(esc(monthLabel(m)), "Live", "live")
@@ -4295,7 +4306,7 @@
       typeTag(h.type) +
       (h.ticker ? ' <span class="badge-curr">' + esc(h.ticker) + "</span>" : "") +
       " - Priced in " + esc(cur) + " - " + esc(priceSrc),
-      '<button class="btn ghost" data-act="nav" data-id="investments">Back</button>' +
+      '<button class="btn" data-act="nav" data-id="investments">Back</button>' +
       '<button class="btn" data-act="edit-holding" data-id="' + h.id + '">' + icon("settings") + " Edit</button>" +
       '<button class="btn" data-act="add-txn" data-id="' + h.id + '" data-type="sell">Sell</button>' +
       '<button class="btn" data-act="add-dividend" data-id="' + h.id + '">+ Dividend</button>' +
@@ -4889,10 +4900,10 @@
         '<td><span class="cf-ledger-category" title="' + esc(r.x.category) + '">' + esc(r.x.category) + '</span>' +
           (r.x.recurringId ? ' <span class="tag recur-tag" title="Auto-logged monthly">' + icon("refresh") + '</span>' : "") +
           (isJoint(r.x) ? ' <span class="tag"' + (r.x.coOwner ? ' title="Shared with ' + esc(r.x.coOwner) + '"' : "") + ">Joint - " + (r.x.share == null ? 100 : r.x.share) + "%</span>" : "") + "</td>" +
-        '<td>' + esc(r.x.note || "") + '</td>' +
+        '<td class="cf-ledger-note" title="' + esc(r.x.note || "") + '">' + esc(r.x.note || "") + '</td>' +
         '<td class="num" style="color:' + col + '">' + (inc ? "+" : "\u2212") + fmtBase(r.b, 2) + '</td>' +
         '<td class="num">' + fmt(r.x.amount, r.x.currency) + ' <span class="badge-curr">' + esc(r.x.currency) + '</span></td>' +
-        '<td class="right"><button class="btn sm ghost" data-act="edit-ledger" data-id="' + r.x.id + '" data-kind="' + r.kind + '">Edit</button> ' +
+        '<td class="right cf-ledger-actions"><button class="btn sm ghost" data-act="edit-ledger" data-id="' + r.x.id + '" data-kind="' + r.kind + '">Edit</button> ' +
         '<button class="btn sm ghost" data-act="del-ledger" data-id="' + r.x.id + '" data-kind="' + r.kind + '" aria-label="Delete ' + r.kind + ' ' + esc(r.x.category) + '">\u2715</button></td></tr>';
       }).join("");
     }
@@ -6020,6 +6031,7 @@
       ["plans", "Do I get future updates?", "Community-app updates are delivered when new versions are published: you\u2019ll see a small \u201cnew version available - Refresh\u201d prompt, or the update will apply the next time you open the app. Optional future services may have separate terms or pricing."],
       ["plans", "Who is Valutio for?", "Investors, freelancers and anyone living across currencies - if you want auto-refreshing stock, ETF, bond, commodity &amp; crypto prices, tax estimates, rebalancing against a target allocation, a secondary currency with live FX, retirement projections, or full month-by-month history, Valutio is for you."],
       ["start", "How do I add my first account or holding?", "On Accounts or Investments, press <strong>+ Add</strong> and fill the short form. Every total recalculates automatically - no rows to insert or formulas to patch."],
+      ["start", "Can an account balance be negative?", "Yes. Enter the statement balance as a negative number for a credit card or overdrawn current account. It reduces net worth directly; adding a separate Debt record is optional and remains a different tracking method."],
       ["start", "Is there a quick way to update all my balances at month-end?", "Yes - on <strong>Accounts</strong>, hit <strong>Update Balances</strong>: one form lists every account, asset and debt with its current figure prefilled. Tab through, type the new statement values, and save once."],
       ["start", "How do I view a past month?", "Pick a Year and Month in the sidebar. Past months show their frozen snapshot; the current month stays live and recalculates in real time."],
       ["start", "What\u2019s the difference between the live month and a frozen one?", "The current month is computed live from your accounts and the latest prices; once closed, a month becomes an immutable snapshot so your history never shifts beneath you."],
@@ -6310,20 +6322,20 @@
     openModal({
       title: "Update Balances",
       wide: true,
-      sub: "Type each current value straight from your statements - Tab jumps to the next field, one Save applies everything.",
+      sub: "Type each current value straight from your statements - account balances may be negative for credit cards. Tab jumps to the next field, one Save applies everything.",
       body: '<div class="ub-list">' + sec("Accounts", accs) + sec("Assets", assets) + sec("Debts", debts) + "</div>",
       submitLabel: "Save All",
       onSubmit: function () {
         var changed = 0, pending = [];
-        var collect = function (list, pfx, key, label) {
+        var collect = function (list, pfx, key, label, allowNegative) {
           (list || []).forEach(function (x) {
             var e = document.getElementById(pfx + x.id); if (!e) return;
             var v = decimalNumber(e.value);
-            if (v == null || v < 0) pending.push({ error: (x.name || label) + " needs a value of zero or higher" });
+            if (v == null || (!allowNegative && v < 0)) pending.push({ error: (x.name || label) + (allowNegative ? " needs a valid number" : " needs a value of zero or higher") });
             else pending.push({ row: x, key: key, value: v });
           });
         };
-        collect(db.accounts, "ub-a-", "balance", "Account");
+        collect(db.accounts, "ub-a-", "balance", "Account", true);
         collect(db.physicalAssets, "ub-p-", "value", "Asset");
         collect(db.debts, "ub-d-", "balance", "Debt");
         var invalid = pending.filter(function (item) { return item.error; })[0];
@@ -6348,7 +6360,7 @@
         '<div class="field"><label>Currency</label><select id="a-cur">' + currencyOptions(a.currency) + "</select></div></div>" +
         '<div class="field" id="a-bucket-other-wrap" style="' + (bucketSel === "Other" ? "" : "display:none") + '">' +
         '<label>Custom type label</label><input id="a-bucket-other" value="' + (isCustom ? esc(a.bucket) : "") + '" placeholder="e.g. Property, Vehicle, Crypto wallet"></div>' +
-        '<div class="field"><label>Current balance</label><input id="a-bal" type="number" step="0.01" value="' + esc(a.balance) + '" placeholder="0.00" required></div>' +
+        '<div class="field"><label>Current balance (negative allowed)</label><input id="a-bal" type="number" step="0.01" value="' + esc(a.balance) + '" placeholder="0.00 or -0.00" required></div>' +
         '<div class="field"><label class="check-row"><input type="checkbox" id="a-joint"' + (a.joint ? " checked" : "") + "> Joint account (shared with someone else)</label></div>" +
         '<div id="a-joint-wrap" style="' + (a.joint ? "" : "display:none") + '">' +
           '<div class="row">' +
@@ -6362,7 +6374,9 @@
         var bucket = val("a-bucket");
         if (bucket === "Other") { var custom = val("a-bucket-other").trim(); if (custom) bucket = custom; }
         var joint = checked("a-joint");
-        var balanceInput = validatedInputNumber("a-bal", "account balance", { min: 0 });
+        // Negative live balances are valid for credit-card/current accounts. A debt record is
+        // optional and remains a separate amortisation/tracking feature.
+        var balanceInput = validatedInputNumber("a-bal", "account balance");
         var shareInput = joint ? (val("a-share") === "" ? { ok: true, value: 50 } : validatedInputNumber("a-share", "ownership share", { min: 0, max: 100 })) : { ok: true, value: 100 };
         if (!balanceInput.ok || !shareInput.ok) return false;
         var share = shareInput.value;
