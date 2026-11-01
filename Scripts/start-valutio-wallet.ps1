@@ -7,9 +7,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $PSScriptRoot
+$scriptRoot = [IO.Path]::GetFullPath($PSScriptRoot)
+$root = Split-Path -Parent $scriptRoot
 $indexFile = Join-Path $root "index.html"
-$server = Join-Path $PSScriptRoot "serve-wallet.mjs"
+$server = Join-Path $scriptRoot "serve-wallet.mjs"
 $url = "http://127.0.0.1:$Port/"
 
 if (-not (Test-Path -LiteralPath $indexFile -PathType Leaf)) {

@@ -62,6 +62,8 @@ From PowerShell in this folder, start the local server:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Scripts\start-valutio-wallet.ps1
 ```
 
+For Explorer or a path containing spaces, you can double-click `Scripts/start-valutio-wallet.cmd` instead.
+
 The script opens the browser automatically at:
 
 ```text

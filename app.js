@@ -1286,6 +1286,13 @@
     });
     return shares > 1e-9 || traded;
   }
+  // Frozen snapshots retain zero-share records for sold holdings so their
+  // aggregate realized P/L can remain intact. Do not render those records as
+  // active historical rows after the sale month; keep the sale month visible
+  // because it still contained a holding transaction.
+  function frozenHoldingVisible(h, frozen, m) {
+    return !!frozen && (num(frozen.shares) > 1e-9 || heldInMonth(h, m));
+  }
   // Walk the buy/sell ledger with weighted-average cost. Returns per-transaction rows
   // with running shares/cost and (for sells) realized P/L.
   function holdingLedger(h) {
@@ -4097,7 +4104,7 @@
       var snapH = (snap && snap.holdings) ? snap.holdings : {};
       // aggregate totals come from the snapshot (cumulative realized survives sold-off positions)
       var tot = { cost: num(snap && snap.cost), mv: num(snap && snap.invest), unreal: num(snap && snap.unrealized), real: num(snap && snap.realized) };
-      var heldP = sortHoldingsByTypeMv(db.holdings.filter(function (h) { return snapH[h.id]; }), function (h) { return frozenHoldingMetrics(snapH[h.id]).marketValueBase; });
+      var heldP = sortHoldingsByTypeMv(db.holdings.filter(function (h) { return frozenHoldingVisible(h, snapH[h.id], m); }), function (h) { return frozenHoldingMetrics(snapH[h.id]).marketValueBase; });
       var rowsP = heldP.map(function (h) {
         var fm = frozenHoldingMetrics(snapH[h.id]);
         var prevFm = previousFrozenHoldingMetrics(m, h.id);

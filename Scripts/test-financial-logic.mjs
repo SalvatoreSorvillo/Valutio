@@ -16,7 +16,7 @@ if (cut < 0) throw new Error("Could not locate the app boot marker");
 const expose = `
   window.__financialTest = {
     defaultDB, migrate, validateDb, validDateString, localDateString, normalizedDecimal,
-    holdingMetrics, frozenHoldingMetrics, positionAt, calcTax, invoiceTotalsForTaxYear, holdingPeriodClass,
+    holdingMetrics, frozenHoldingMetrics, positionAt, heldInMonth, frozenHoldingVisible, calcTax, invoiceTotalsForTaxYear, holdingPeriodClass,
     holdingFlows, dividendsInTaxYear, interestsInTaxYear, realizedInTaxYear, realizedYearSplit, monthTotal,
     benchmarkTrendValues, portfolioTWR,
     drpPairValidationErrors, upsertDividendReinvestment, removeDividendReinvestment, restoreDividendReinvestment, repropagateHolding,
@@ -479,6 +479,16 @@ test("fully sold holdings are excluded from live quote refresh", () => {
   const h = { id: "sold", currency: "EUR", price: 120, realizedSeed: 0,
     transactions: [tx("a", "2025-07-01", "buy", 10, 100, 10), tx("b", "2025-08-01", "sell", 10, 120, 20)] };
   d.holdings = [h]; q.setDb(d); assert.equal(q.holdingHasOpenPosition(h), false);
+});
+
+test("frozen investments hide zero-share holdings after their sale month", () => {
+  const d = wallet();
+  const h = { id: "sold-history", currency: "EUR", price: 120, realizedSeed: 0,
+    transactions: [tx("buy", "2025-07-01", "buy", 10, 100, 10), tx("sell", "2025-08-01", "sell", 10, 120, 20)] };
+  const frozen = { shares: 0, buyPrice: 0, fees: 0, contributionCost: 0, price: 0, realized: 200 };
+  d.holdings = [h]; q.setDb(d);
+  assert.equal(q.frozenHoldingVisible(h, frozen, "2025-08"), true);
+  assert.equal(q.frozenHoldingVisible(h, frozen, "2025-09"), false);
 });
 
 test("strict validation rejects malformed brackets", () => {

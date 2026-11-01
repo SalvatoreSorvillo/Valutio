@@ -7,11 +7,18 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Get-PythonCommand {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        return "py"
-    }
+    # Prefer the direct interpreter. On some Windows installs the py launcher
+    # exists but is not configured, while python.exe is fully usable.
     if (Get-Command python -ErrorAction SilentlyContinue) {
         return "python"
+    }
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        try {
+            & py --version *> $null
+            if ($LASTEXITCODE -eq 0) { return "py" }
+        } catch {
+            # Fall through to the actionable error below.
+        }
     }
     throw "Python was not found on PATH. Install Python for Windows, reopen PowerShell, then run: python -m pip install rjsmin rcssmin"
 }

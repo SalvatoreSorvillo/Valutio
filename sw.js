@@ -1,8 +1,8 @@
 /* Valutio service worker: makes the app installable and fully offline.
    App shell is cached; market-data API calls always go to the network. */
-var CACHE = "valutio-v489";
+var CACHE = "valutio-v490";
 var ASSETS = [
-  "./", "./index.html", "./app.css?v=489", "./app.i18n.js?v=489", "./statement-categorizer.js?v=489", "./app.js?v=489",
+  "./", "./index.html", "./app.css?v=490", "./app.i18n.js?v=490", "./statement-categorizer.js?v=490", "./app.js?v=490",
   "./manifest.webmanifest",
   "./LICENSE",
   "./Icons/icon-192.png", "./Icons/icon-512.png", "./Icons/icon-maskable-512.png",
